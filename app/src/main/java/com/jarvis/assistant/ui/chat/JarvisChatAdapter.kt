@@ -3,10 +3,12 @@ package com.jarvis.assistant.ui.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -38,6 +40,7 @@ class JarvisChatAdapter(
     inner class MessageViewHolder(
         private val binding: ItemNairaChatMessageBinding
     ) : RecyclerView.ViewHolder(binding.root) {
+        private var lastAssistantText: String = ""
 
         fun bind(turn: ChatTurn) {
             val context = binding.root.context
@@ -61,7 +64,30 @@ class JarvisChatAdapter(
             // Assistant Bubble
             if (turn.jarvisResponse.isNotBlank()) {
                 binding.layoutAssistantContainer.visibility = View.VISIBLE
-                binding.tvAssistantMessage.text = turn.jarvisResponse
+                ChatMessageFormatter.render(binding.tvAssistantMessage, turn.jarvisResponse)
+                if (turn.jarvisResponse != lastAssistantText) binding.tvAssistantMessage.playDustReveal()
+                lastAssistantText = turn.jarvisResponse
+                val artifact = ChatMessageFormatter.extractFirstFile(turn.jarvisResponse)
+                binding.layoutFileCard.isVisible = artifact != null
+                if (artifact != null) {
+                    binding.tvFileArtifactName.text = artifact.fileName
+                    binding.btnFileArtifactCopy.setOnClickListener {
+                        copyToClipboard(context, artifact.fileName, artifact.content)
+                    }
+                    binding.btnFileArtifactDownload.setOnClickListener {
+                        try {
+                            val savedUri = ChatFileSaver.save(context, artifact)
+                            val message = when {
+                                savedUri == null -> "Dosya kaydedilemedi"
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> "Dosya İndirilenler/Jarvis klasörüne kaydedildi"
+                                else -> "Dosya uygulamanın indirme klasörüne kaydedildi"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Dosya kaydedilemedi: ${e.message ?: "bilinmeyen hata"}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
 
                 binding.btnAssistantCopy.setOnClickListener {
                     copyToClipboard(context, "Jarvis response", turn.jarvisResponse)
@@ -72,6 +98,7 @@ class JarvisChatAdapter(
                 }
             } else {
                 binding.layoutAssistantContainer.visibility = View.GONE
+                binding.layoutFileCard.visibility = View.GONE
             }
         }
 

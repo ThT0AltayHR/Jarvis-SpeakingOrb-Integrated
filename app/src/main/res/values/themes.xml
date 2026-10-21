@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Base App Theme -->
-    <style name="Theme.JarvisAssistant" parent="Theme.JarvisAssistant.Light" />
+    <style name="Theme.JarvisAssistant" parent="Theme.JarvisAssistant.Dark" />
 
     <!-- 1. LIGHT THEME - LIQUID PEARL GLASS EDITION -->
     <style name="Theme.JarvisAssistant.Light" parent="Theme.Material3.Light.NoActionBar">
@@ -44,17 +44,17 @@
 
     <!-- 2. DARK THEME - LIQUID OBSIDIAN GLASS EDITION -->
     <style name="Theme.JarvisAssistant.Dark" parent="Theme.Material3.Dark.NoActionBar">
-        <item name="android:statusBarColor">#070914</item>
+        <item name="android:statusBarColor">#000000</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:navigationBarColor">#070914</item>
+        <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="android:windowBackground">#070914</item>
+        <item name="android:windowBackground">#000000</item>
         <item name="colorPrimary">#5B8CFF</item>
         <item name="colorOnPrimary">#FFFFFF</item>
         <item name="colorSurface">#33141B3D</item>
         <item name="colorOnSurface">#F8FAFC</item>
 
-        <item name="themeBg">#070914</item>
+        <item name="themeBg">#000000</item>
         <item name="themeSurface">#33141B3D</item>
         <item name="themeCardBg">#33141B3D</item>
         <item name="themeCardBorder">#4D5B8CFF</item>

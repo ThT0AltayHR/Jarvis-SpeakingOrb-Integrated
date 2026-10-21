@@ -468,7 +468,33 @@ object CommandParser {
             }
         }
 
-        // Web Search (Google in browser) - Must explicitly have search or google intent
+        // Explicit browser requests open Chrome. Plain web research stays in the background.
+        val browserStart = "(?:chrome(?:['’]?da|['’]?dan)|taray[ıi]c[ıi]da|telefonumdan|telefondan)"
+        val browserSearchPatterns = listOf(
+            Regex("$prefix$browserStart\\s+(?:ara|arama yap)\\s+(.+)$", RegexOption.IGNORE_CASE),
+            Regex("$prefix$browserStart\\s+(.+?)\\s+ara$", RegexOption.IGNORE_CASE),
+            Regex("$prefix(.+?)\\s+$browserStart\\s+ara$", RegexOption.IGNORE_CASE)
+        )
+        for (pattern in browserSearchPatterns) {
+            val match = pattern.find(clean) ?: continue
+            val query = match.groupValues.getOrNull(1).orEmpty().trim()
+            if (query.length > 1) return ParsedCommandResult(JarvisCommand.SearchWebInBrowser(query), 0.97f, "WEB_SEARCH_BROWSER")
+        }
+
+        val turkishSearchPatterns = listOf(
+            Regex("$prefix(?:web['’]?de|internette|internet['’]te|google['’]?da|google['’]?de)\\s+ara\\s+(.+)$", RegexOption.IGNORE_CASE),
+            Regex("$prefix(?:web['’]?de|internette|internet['’]te|google['’]?da|google['’]?de)\\s+(.+?)\\s+(?:ara|ara lütfen|arar m[ıi]s[ıi]n|ara(?:r)? m[ıi]s[ıi]n lütfen)$", RegexOption.IGNORE_CASE),
+            Regex("$prefix(.+?)\\s+(?:web['’]?de|internette|internet['’]te|google['’]?da|google['’]?de)\\s+ara$", RegexOption.IGNORE_CASE)
+        )
+        for (pattern in turkishSearchPatterns) {
+            val match = pattern.find(clean) ?: continue
+            val query = match.groupValues.getOrNull(1).orEmpty()
+                .replace(Regex("(?i)^(şunu|sunu|şu|su)\\s+"), "")
+                .trim()
+            if (query.length > 1) return ParsedCommandResult(JarvisCommand.SearchWeb(query), 0.96f, "WEB_SEARCH_BACKGROUND_TR")
+        }
+
+        // English and Hinglish equivalents; default search no longer opens a browser.
         val searchWebRegex = Regex("$prefix(?:search\\s+on\\s+google|search\\s+the\\s+web\\s+for|search\\s+google\\s+for|search\\s+for|search|google)\\s+(.+?)(?:\\s+(?:on\\s+google|on\\s+the\\s+web|online|in\\s+browser))?$", RegexOption.IGNORE_CASE)
         val searchHinglish = Regex("^(.+?)\\s+(?:search\\s+karo|search\\s+kardo|google\\s+karo|google\\s+pe\\s+search\\s+karo)$", RegexOption.IGNORE_CASE)
         val searchWebMatch = searchWebRegex.find(clean) ?: searchHinglish.find(clean)
@@ -476,7 +502,6 @@ object CommandParser {
             val query = searchWebMatch.groupValues[1]
                 .replace(Regex("(?i)\\s*(on google|on the web|on the internet|online|on browser|pe search karo|search karo|please)$"), "")
                 .trim()
-            // Ignore casual speech like "search me", "search here"
             if (query.isNotBlank() && query.length > 1 && !listOf("me", "here", "it", "this", "that").contains(query.lowercase(Locale.ROOT))) {
                 return ParsedCommandResult(JarvisCommand.SearchWeb(query), 0.95f, "WEB_SEARCH")
             }

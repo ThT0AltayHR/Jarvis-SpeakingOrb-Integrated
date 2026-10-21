@@ -1,4 +1,4 @@
-package com.jarvis.assistant.security
+package com.jarvisai.app.security
 
 import android.app.AlertDialog
 import android.content.Context
@@ -20,7 +20,7 @@ object SecurityManager {
     const val GITHUB_REPO       = "https://github.com/techgptx/Playlist"
     const val LICENSE_NAME      = "TAMCL v1.0 — Content creators MUST credit Tech GPTx"
 
-    private const val EXPECTED_PACKAGE = "com.jarvis.assistant"
+    private const val EXPECTED_PACKAGE = "com.jarvisai.app"
 
     fun verify(context: Context) {
         checkPackageName(context)

@@ -67,6 +67,29 @@ for (const src of orbHtml.matchAll(/<script\s+src=["']([^"']+)["']/g)) {
 }
 assert.match(orbHtml, /window\.JarvisOrb\s*=\s*\{/,
   'orb.html should expose the native-to-WebView bridge');
+assert.match(orbHtml, /setExternalAudio:\s*\(amp, bass, high, playbackMs, playbackActive\)/,
+  'native audio clock and active state should reach the orb');
+assert.match(orbHtml, /externalSync:\s*true/,
+  'live assistant captions should use the hardware playback clock');
+assert.match(orbHtml, /clearCaptionDust/,
+  'caption clearing should explicitly clear the particle canvas');
+assert.match(orbHtml, /left:50%; top:1%;[^}]*width:min\(25vw, 96px\); height:min\(25vw, 96px\)/,
+  'thinking animation should occupy a reserved status area above the speaking sphere');
+assert.match(orbHtml, /speaking-orb \{ display:block; position:absolute; left:14%; bottom:0; width:72%/,
+  'main speaking sphere should remain visible below the status area');
+assert.doesNotMatch(orbHtml, /speaking-orb\s*\{\s*opacity:0/,
+  'thinking animation must not hide the speaking orb');
+const speakingOrbSource = fs.readFileSync(path.join(assets, 'speaking-orb.js'), 'utf8');
+assert.match(speakingOrbSource, /const autoCount = \(\) => matchMedia\('\(pointer: coarse\)'\)\.matches \? 2800 : 8000/,
+  'mobile particle density should be bounded for smooth rendering');
+assert.match(speakingOrbSource, /this\.frameIntervalMs=\/Android\/i\.test\(navigator\.userAgent\|\|''\)\?1000\/30/,
+  'the main speaking orb should use a mobile-friendly frame cap');
+assert.match(speakingOrbSource, /L\.externalSync&&!this\.externalAudioActive/,
+  'caption text and dust should only animate while the real audio is playing');
+assert.match(orbHtml, /thinkingFrameIntervalMs = isAndroidWebView \? \(1000 \/ 30\)/,
+  'thinking animations should be frame-capped in Android WebView');
+assert.match(orbHtml, /Math\.min\(isAndroidWebView \? 1\.35 : 2, deviceDpr\)/,
+  'thinking canvas resolution should be capped on mobile GPU');
 
 // Exercise the actual inline WebView controller with a small DOM/timer shim.
 const inlineMatch = orbHtml.match(/<script>([\s\S]*?)<\/script>/);
@@ -106,7 +129,9 @@ const fakeCanvas = {
   setAttribute(name, value) { this.attributes[name] = value; },
 };
 const fakeOrb = {
-  state: 'done', time: 0, line: null, capEl: { textContent: '', classList: { remove() {} } },
+  state: 'done', time: 0, line: null, level: 0, externalAudioTime: 0, externalAudioLevel: 0, externalAudioActive: false,
+  capEl: { textContent: '', classList: { remove() {} } },
+  dustClearedCount: 0, clearCaptionDust() { this.dustClearedCount++; },
   estimate(tokens, start) { return tokens.map((w, i) => ({ w, start: start + i * 0.1, end: start + (i + 1) * 0.1 })); },
   pauseCount: 0, resumeCount: 0,
   pause() { this.pauseCount++; }, resume() { this.resumeCount++; },
@@ -125,12 +150,26 @@ class FakeResizeObserver { observe() {} disconnect() {} }
 const fakeRaf = (fn) => { const id = clock.nextId++; clock.frames.add(id); return id; };
 const fakeCancelRaf = (id) => clock.frames.delete(id);
 vm.runInNewContext(inlineMatch[1], {
-  window: fakeWindow, document: fakeDocument, performance: { now: () => clock.now },
+  window: fakeWindow, document: fakeDocument, navigator: { userAgent: 'Android WebView' }, performance: { now: () => clock.now },
   requestAnimationFrame: fakeRaf, cancelAnimationFrame: fakeCancelRaf,
   ResizeObserver: FakeResizeObserver, Number, String, Set, Math,
 }, { filename: 'orb.html:inline-script', timeout: 5000 });
 const bridge = fakeWindow.JarvisOrb;
 assert.ok(bridge, 'WebView controller should publish JarvisOrb');
+bridge.setExternalAudio(0.42, 0.2, 0.3, 875, true);
+assert.equal(fakeOrb.externalAudioTime, 0.875, 'the real playback clock should reach the renderer in seconds');
+assert.equal(fakeOrb.externalAudioLevel, 0.42, 'voice animation should use the measured audio level');
+assert.equal(fakeOrb.externalAudioActive, true, 'captions should know when audible playback starts');
+bridge.setExternalAudio(0, 0, 0, 0, false);
+assert.equal(fakeOrb.externalAudioActive, false, 'the caption/dust layer should be able to stop with audible playback');
+bridge.setExternalAudio(0.55, 0.2, 0.4, 1250, true);
+bridge.appendText('Merhaba dünya');
+assert.equal(fakeOrb.line.externalSync, true, 'live captions should use hardware playback time');
+assert.equal(fakeOrb.line.words[0].start, 1.25, 'the first caption should anchor to the real audio playhead');
+const clearsBefore = fakeOrb.dustClearedCount;
+bridge.clearCaption();
+assert.equal(fakeOrb.line, null, 'clearing the transcript should clear its active word line');
+assert.ok(fakeOrb.dustClearedCount > clearsBefore, 'clearing the transcript should clear lingering dust');
 bridge.setState('speaking');
 bridge.setTaskState('COMPLETED');
 assert.equal(fakeRoot.classList.contains('thinking-active'), false,
@@ -146,8 +185,11 @@ advanceClock(1249);
 assert.equal(fakeRoot.classList.contains('thinking-active'), true,
   'completion should remain visible through its display interval');
 advanceClock(1);
-assert.equal(fakeRoot.classList.contains('thinking-active'), false,
-  'completion should return to the base orb after the display interval');
+assert.equal(fakeRoot.classList.contains('thinking-active'), true,
+  'the listening preset should return after the completion display interval');
+assert.equal(fakeCanvas.attributes['aria-label'], 'Jarvis dinliyor',
+  'listening should activate the listening preset above the base orb');
+bridge.setState('idle');
 const nativeTaskStates = {
   UNDERSTANDING: 'Jarvis düşünüyor',
   PLANNING: 'Jarvis plan hazırlıyor',
@@ -176,6 +218,11 @@ bridge.setThinkingAnimation('weaving');
 assert.equal(fakeRoot.classList.contains('thinking-active'), true, 'manual preset should show the animation overlay');
 bridge.clearThinkingAnimation();
 assert.equal(fakeRoot.classList.contains('thinking-active'), false, 'clearing manual preset should restore the base orb');
-console.log('PASS local script references and Jarvis WebView bridge');
-console.log('PASS queued completion, planning state, and manual animation lifecycle');
+const audioPlayerSource = fs.readFileSync(path.join(projectRoot, 'app', 'src', 'main', 'java', 'com', 'jarvis', 'assistant', 'audio', 'AudioPlayer.kt'), 'utf8');
+assert.match(audioPlayerSource, /playbackHeadPosition/,
+  'the Android playback clock must come from AudioTrack hardware position');
+assert.match(audioPlayerSource, /allSamplesPlayed/,
+  'playback must not be marked finished until buffered PCM is rendered');
+console.log('PASS local script references, hardware playback clock, and caption/dust cleanup hooks');
+console.log('PASS queued completion, planning state, and additive animation lifecycle');
 console.log('PASS all Thinking Orb smoke checks');

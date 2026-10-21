@@ -10,7 +10,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class AudioPlayer(
     private val onPlaybackStateChanged: (isPlaying: Boolean) -> Unit,
-    private val onPlaybackAmplitude: (amplitude: Float) -> Unit
+    private val onPlaybackAmplitude: (amplitude: Float) -> Unit,
+    private val onPlaybackProgress: (elapsedMs: Long) -> Unit = {}
 ) {
     companion object {
         private const val TAG = "AudioPlayer"
@@ -24,6 +25,8 @@ class AudioPlayer(
     private val audioQueue = LinkedBlockingQueue<ByteArray>()
     private val isRunning = AtomicBoolean(false)
     private val isPlayingState = AtomicBoolean(false)
+    @Volatile private var playbackHeadStart = 0L
+    @Volatile private var framesWrittenThisTurn = 0L
     private var playbackThread: Thread? = null
 
     init {
@@ -75,23 +78,32 @@ class AudioPlayer(
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             } catch (_: Exception) {}
             var silenceCounter = 0
+            framesWrittenThisTurn = 0L
+
             while (isRunning.get()) {
                 try {
-                    // If not currently playing, wait for chunks and start AudioTrack before writing
                     if (!isPlayingState.get()) {
                         val firstChunk = audioQueue.poll(30, TimeUnit.MILLISECONDS)
                         if (firstChunk != null && firstChunk.isNotEmpty()) {
                             isTurnComplete.set(false)
                             isPlayingState.set(true)
                             silenceCounter = 0
+                            framesWrittenThisTurn = 0L
+                            onPlaybackProgress(0L)
                             onPlaybackStateChanged(true)
 
-                            // Start hardware track immediately so write() streams smoothly without blocking
+                            // The playhead, not the WebSocket arrival time, is the caption clock.
                             synchronized(trackLock) {
-                                audioTrack?.let { track ->
-                                    if (track.state == AudioTrack.STATE_INITIALIZED && track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                                var track = audioTrack
+                                if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
+                                    initAudioTrack()
+                                    track = audioTrack
+                                }
+                                track?.let { active ->
+                                    playbackHeadStart = active.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                                    if (active.state == AudioTrack.STATE_INITIALIZED && active.playState != AudioTrack.PLAYSTATE_PLAYING) {
                                         try {
-                                            track.play()
+                                            active.play()
                                         } catch (e: Exception) {
                                             Log.e(TAG, "Error calling play(): ${e.message}")
                                         }
@@ -99,30 +111,34 @@ class AudioPlayer(
                                 }
                             }
 
-                            writeToTrack(firstChunk)
+                            val written = writeToTrack(firstChunk)
+                            framesWrittenThisTurn += (written / 2).toLong()
                             val amplitude = AudioUtils.calculateRmsNormalized(firstChunk, firstChunk.size)
                             onPlaybackAmplitude(amplitude)
+                            publishPlaybackProgress()
+                        } else {
+                            onPlaybackProgress(0L)
                         }
                         continue
                     }
 
-                    // Currently playing: stream incoming chunks to the hardware AudioTrack
                     val chunk = audioQueue.poll(20, TimeUnit.MILLISECONDS)
                     if (chunk != null && chunk.isNotEmpty()) {
                         silenceCounter = 0
                         val amplitude = AudioUtils.calculateRmsNormalized(chunk, chunk.size)
                         onPlaybackAmplitude(amplitude)
-
-                        writeToTrack(chunk)
+                        val written = writeToTrack(chunk)
+                        framesWrittenThisTurn += (written / 2).toLong()
+                        publishPlaybackProgress()
                     } else {
                         silenceCounter++
-                        // Clean turn completion:
-                        // 1. If Gemini signaled turnComplete: wait 8 cycles (~160ms) of empty queue
-                        //    so the hardware AudioTrack buffer has rendered out to the speaker cleanly.
-                        // 2. If Gemini is still generating (turnComplete not yet received): wait 40 cycles (~800ms)
-                        //    to tolerate normal chunk gaps without stalling the mic.
-                        val shouldFinish = (isTurnComplete.get() && silenceCounter >= 8) || (silenceCounter >= 40)
+                        // Don't report speech as finished just because the network queue is empty.
+                        // Wait until AudioTrack's hardware playhead has actually rendered all PCM.
+                        val allSamplesPlayed = playedFramesThisTurn() >= framesWrittenThisTurn
+                        val shouldFinish = allSamplesPlayed &&
+                            ((isTurnComplete.get() && silenceCounter >= 8) || silenceCounter >= 40)
 
+                        publishPlaybackProgress()
                         if (shouldFinish && isPlayingState.get()) {
                             isPlayingState.set(false)
                             onPlaybackStateChanged(false)
@@ -172,11 +188,17 @@ class AudioPlayer(
             onPlaybackStateChanged(false)
             onPlaybackAmplitude(0f)
         }
+        onPlaybackProgress(0L)
     }
 
     fun isPlaying(): Boolean = isPlayingState.get() || !audioQueue.isEmpty()
 
     fun release() {
+        if (isPlayingState.getAndSet(false)) {
+            onPlaybackStateChanged(false)
+            onPlaybackAmplitude(0f)
+        }
+        onPlaybackProgress(0L)
         isRunning.set(false)
         playbackThread?.interrupt()
         playbackThread = null
@@ -198,34 +220,62 @@ class AudioPlayer(
         }
     }
 
-    private fun writeToTrack(chunk: ByteArray) {
+    private fun playedFramesThisTurn(): Long {
+        val head = synchronized(trackLock) {
+            val track = audioTrack
+            if (track == null || track.state != AudioTrack.STATE_INITIALIZED) null
+            else track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+        } ?: return 0L
+        val delta = if (head >= playbackHeadStart) head - playbackHeadStart
+            else (1L shl 32) - playbackHeadStart + head
+        return delta.coerceAtLeast(0L)
+    }
+
+    private fun publishPlaybackProgress() {
+        val playedFrames = playedFramesThisTurn().coerceAtMost(framesWrittenThisTurn)
+        onPlaybackProgress(playedFrames * 1000L / SAMPLE_RATE)
+    }
+
+    private fun writeToTrack(chunk: ByteArray): Int {
         synchronized(trackLock) {
             var track = audioTrack
             if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
                 initAudioTrack()
                 track = audioTrack
             }
-            track?.let { t ->
-                if (t.state == AudioTrack.STATE_INITIALIZED && t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                    try { t.play() } catch (_: Exception) {}
-                }
-                val written = t.write(chunk, 0, chunk.size)
-                if (written < 0) {
-                    Log.w(TAG, "AudioTrack write failed ($written). Reinitializing AudioTrack...")
-                    try { t.release() } catch (_: Exception) {}
+            var activeTrack = track ?: return 0
+            var offset = 0
+            var recoveryUsed = false
+
+            while (offset < chunk.size) {
+                if (activeTrack.state != AudioTrack.STATE_INITIALIZED) {
+                    if (recoveryUsed) break
+                    try { activeTrack.release() } catch (_: Exception) {}
                     initAudioTrack()
-                    audioTrack?.let { reloaded ->
-                        try {
-                            if (reloaded.state == AudioTrack.STATE_INITIALIZED) {
-                                reloaded.play()
-                                reloaded.write(chunk, 0, chunk.size)
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error playing recreated track: ${e.message}")
-                        }
-                    }
+                    activeTrack = audioTrack ?: break
+                    recoveryUsed = true
+                }
+                if (activeTrack.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                    try { activeTrack.play() } catch (_: Exception) {}
+                }
+
+                val written = activeTrack.write(chunk, offset, chunk.size - offset)
+                if (written > 0) {
+                    offset += written
+                } else if (written < 0 && !recoveryUsed) {
+                    Log.w(TAG, "AudioTrack write failed ($written). Reinitializing AudioTrack...")
+                    try { activeTrack.release() } catch (_: Exception) {}
+                    initAudioTrack()
+                    activeTrack = audioTrack ?: break
+                    recoveryUsed = true
+                } else {
+                    // A blocking stream write should not return zero for a non-empty chunk.
+                    // Stop rather than spin forever if the platform audio driver does.
+                    if (written < 0) Log.e(TAG, "AudioTrack could not recover after write failure ($written)")
+                    break
                 }
             }
+            return offset
         }
     }
 }

@@ -906,9 +906,9 @@ class GeminiLiveWebSocket(
     /**
      * Sends a text prompt to Gemini Live using the client_content turn protocol.
      */
-    fun sendClientContent(text: String) {
-        if (!isConnected.get() || !isSetupComplete.get() || text.isBlank()) return
-        try {
+    fun sendClientContent(text: String): Boolean {
+        if (!isConnected.get() || !isSetupComplete.get() || text.isBlank()) return false
+        return try {
             val msg = JSONObject().apply {
                 put("client_content", JSONObject().apply {
                     put("turns", JSONArray().put(JSONObject().apply {
@@ -920,10 +920,56 @@ class GeminiLiveWebSocket(
                     put("turn_complete", true)
                 })
             }
-            webSocket?.send(msg.toString())
-            Log.d(TAG, "Sent client_content: $text")
+            val sent = webSocket?.send(msg.toString()) == true
+            if (sent) Log.d(TAG, "Sent client_content (${text.length} chars)")
+            sent
         } catch (e: Exception) {
             Log.e(TAG, "sendClientContent failed: ${e.message}", e)
+            false
+        }
+    }
+
+    /** Sends a single multimodal user turn without splitting files into unrelated turns. */
+    fun sendClientContentWithMedia(
+        text: String,
+        imageJpegs: List<ByteArray>,
+        audioPcm16k: List<ByteArray>
+    ): Boolean {
+        if (!isConnected.get() || !isSetupComplete.get() || text.isBlank()) return false
+        return try {
+            val parts = JSONArray().put(JSONObject().put("text", text))
+            var totalBytes = text.toByteArray(Charsets.UTF_8).size
+            imageJpegs.take(12).forEach { image ->
+                if (image.isNotEmpty() && totalBytes + image.size <= 5 * 1024 * 1024) {
+                    parts.put(JSONObject().put("inline_data", JSONObject().apply {
+                        put("mime_type", "image/jpeg")
+                        put("data", Base64.encodeToString(image, Base64.NO_WRAP))
+                    }))
+                    totalBytes += image.size
+                }
+            }
+            audioPcm16k.take(8).forEach { audio ->
+                if (audio.isNotEmpty() && totalBytes + audio.size <= 5 * 1024 * 1024) {
+                    parts.put(JSONObject().put("inline_data", JSONObject().apply {
+                        put("mime_type", "audio/pcm;rate=16000")
+                        put("data", Base64.encodeToString(audio, Base64.NO_WRAP))
+                    }))
+                    totalBytes += audio.size
+                }
+            }
+            val msg = JSONObject().put("client_content", JSONObject().apply {
+                put("turns", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", parts)
+                }))
+                put("turn_complete", true)
+            })
+            val sent = webSocket?.send(msg.toString()) == true
+            if (sent) Log.i(TAG, "Sent multimodal client_content (images=${imageJpegs.size.coerceAtMost(12)}, audioSamples=${audioPcm16k.size.coerceAtMost(8)}, bytes=$totalBytes)")
+            sent
+        } catch (e: Exception) {
+            Log.e(TAG, "sendClientContentWithMedia failed: ${e.message}", e)
+            false
         }
     }
 

@@ -19,7 +19,9 @@
     return cache.get(count);
   };
   const bandTilt = [[.32,0],[-.72,1.02],[1.08,-.82]].map(([tilt,rot]) => [Math.cos(tilt+1),Math.sin(tilt+1),Math.cos(rot),Math.sin(rot)]);
-  const autoCount = () => matchMedia('(pointer: coarse)').matches ? 6000 : 12000;
+  // Keep a useful particle density on phones without locking the renderer to a costly 6000-dot frame.
+  // The existing frame-time watchdog can reduce this further on slower devices.
+  const autoCount = () => matchMedia('(pointer: coarse)').matches ? 2800 : 8000;
   const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
   const ease = p => p * p * (3 - 2 * p);
 
@@ -102,10 +104,12 @@
         this.gl=setupGL(dots); if(!this.gl) this.dctx=dots.getContext('2d');
       }
       this.media=matchMedia('(prefers-reduced-motion: reduce)');
+      this.frameIntervalMs=/Android/i.test(navigator.userAgent||'')?1000/30:1000/45;this.lastFrameAt=0;
       this.weights=names.map(n=>n===this.state?1:0); this.time=0; this.last=0; this.slow=0; this.env=0; this.onsets=[]; this.line=null;
-      this.resize=()=>{const w=this.canvas.parentNode.getBoundingClientRect().width,size=Math.max(1,Math.round(w*Math.min(devicePixelRatio||1,2)));
+      this.externalAudioTime=0; this.externalAudioLevel=0; this.externalAudioActive=false;
+      this.resize=()=>{const w=this.canvas.parentNode.getBoundingClientRect().width,dpr=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2),size=Math.max(1,Math.round(w*dpr));
         this.canvas.width=this.canvas.height=this.dots.width=this.dots.height=size;this.style.setProperty('--cap-size',Math.round(clamp(w*.066,18,34))+'px');
-        const hr=this.getBoundingClientRect(),k=Math.min(devicePixelRatio||1,2);this.fx.width=Math.round(hr.width*k);this.fx.height=Math.round(hr.height*k);this.glyphCache=new Map();this.draw(this.time);};
+        const hr=this.getBoundingClientRect(),k=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2);this.fx.width=Math.round(hr.width*k);this.fx.height=Math.round(hr.height*k);this.glyphCache=new Map();this.draw(this.time);};
       this.observer=new ResizeObserver(this.resize);this.observer.observe(this);this.resize();
       this.onMotion=()=>{const resume=!this.suspended;this.pause();if(resume)this.resume();};
       this.media.addEventListener('change',this.onMotion);
@@ -114,7 +118,7 @@
     }
     disconnectedCallback(){this.pause();this.observer?.disconnect();this.media?.removeEventListener('change',this.onMotion);this.stopMic?.();}
     start(){if(!this.suspended&&!this.hasAttribute('recording')&&!this.frame)this.frame=requestAnimationFrame(this.tick);}
-    pause(){this.suspended=true;if(this.frame)cancelAnimationFrame(this.frame);this.frame=0;this.last=0;}
+    pause(){this.suspended=true;if(this.frame)cancelAnimationFrame(this.frame);this.frame=0;this.last=0;this.lastFrameAt=0;}
     resume(){this.suspended=false;this.start();}
     get state(){const v=this.getAttribute('state');return names.includes(v)?v:'listening';}
     set state(v){this.setAttribute('state',v);}
@@ -180,15 +184,18 @@
     tick=(now)=>{
       this.frame=0;
       if(this.hasAttribute('recording'))return;
+      if(this.lastFrameAt && now-this.lastFrameAt<this.frameIntervalMs){this.frame=requestAnimationFrame(this.tick);return;}
+      this.lastFrameAt=now;
       const dt=this.last?Math.min((now-this.last)/1000,.05):0;this.last=now;this.time+=dt;
       if(!this.hasAttribute('particles')&&dt){this.slow=dt>.025?this.slow+1:0;if(this.slow>30&&this.auto>800){this.auto=Math.max(800,Math.round(this.auto*.6));this.slow=0;}}
       const k=1-Math.exp(-dt*7);
       this.weights=this.weights.map((w,i)=>w+((names[i]===this.state?1:0)-w)*k);
       const L=this.line;let raw=0,lt=0;
-      if(L){lt=L.audio?L.audio.currentTime:this.time-L.t0;
+      if(L){lt=L.audio?L.audio.currentTime:(L.externalSync?Math.max(0,this.externalAudioTime):this.time-L.t0);
         if(this.an&&L.audio&&!L.audio.paused){this.an.getFloatTimeDomainData(this.fbuf);let s=0;for(const v of this.fbuf)s+=v*v;raw=clamp(Math.sqrt(s/this.fbuf.length)*5);}
+        else if(L.externalSync){raw=clamp(this.externalAudioLevel);}
         else raw=pulseEnv(L.words,lt);
-        const end=L.done??(L.words.at(-1)?.end??0),over=L.audio?L.audio.ended:lt>end+.1;
+        const end=L.done??(L.words.at(-1)?.end??0),over=L.audio?L.audio.ended:(L.externalSync?false:lt>end+.1);
         if(over&&this.state==='speaking'&&!L.after){L.after=true;this.state=this.getAttribute('rest')||'listening';this.dispatchEvent(new CustomEvent('end'));}}
       const prev=this.env;this.env+=(raw-this.env)*(raw>this.env?.55:.18);
       // a syllable is a fast rise in the envelope; each one sends a bright ring up the sphere
@@ -210,11 +217,11 @@
 
     caption(t,L){
       const el=this.capEl;if(!el)return;
-      if(!L||!L.words.length){if(el.childElementCount)el.textContent='';el.dataset.g='';return;}
+      if(!L||!L.words.length||(L.externalSync&&!this.externalAudioActive)){if(el.childElementCount)el.textContent='';el.dataset.g='';this.flight(t,[]);return;}
       const W=L.words,G=L.groups??=groupsOf(W);
       let gi=-1;G.forEach((g,i)=>{if(t>=W[g[0]].start-.04)gi=i;});
       const last=W.at(-1).end,fade=clamp(1-(t-last-1.8)/.4);
-      if(gi<0||fade<=0){if(el.childElementCount)el.textContent='';el.dataset.g='';return;}
+      if(gi<0||fade<=0){if(el.childElementCount)el.textContent='';el.dataset.g='';this.flight(t,[]);return;}
       const key=gi+':'+W.length+':'+(L.who||'');el.classList.toggle('user',L.who==='user');
       if(el.dataset.g!==key){el.dataset.g=key;el.textContent='';
         for(const i of G[gi]){const s=document.createElement('span');s.textContent=W[i].w+' ';el.append(s);}}
@@ -269,6 +276,11 @@
         }
       });
       g.globalCompositeOperation='source-over';
+    }
+    clearCaptionDust(){
+      if(!this.fctx||!this.fx)return;
+      this.fctx.setTransform(1,0,0,1,0,0);
+      this.fctx.clearRect(0,0,this.fx.width,this.fx.height);
     }
 
     paint(t,w,{env,onsets}){

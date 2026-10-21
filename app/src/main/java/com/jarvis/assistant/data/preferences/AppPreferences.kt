@@ -8,6 +8,7 @@ import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.jarvis.assistant.data.model.ChatTurn
+import com.jarvis.assistant.data.model.ChatSession
 import com.jarvis.assistant.data.model.GeminiConstants
 
 class AppPreferences(context: Context) {
@@ -48,6 +49,9 @@ class AppPreferences(context: Context) {
         private const val KEY_USER_NAME = "key_user_name"
         private const val KEY_MIC_MUTED = "key_mic_muted"
         private const val KEY_CHAT_HISTORY = "key_chat_history"
+        private const val KEY_CHAT_SESSIONS = "key_chat_sessions"
+        private const val KEY_ACTIVE_CHAT_SESSION = "key_active_chat_session"
+        private const val KEY_WELCOME_SPOKEN = "key_welcome_spoken"
         private const val KEY_FAVORITE_SONG = "key_favorite_song"
         private const val KEY_FAVORITE_APP = "key_favorite_app"
         private const val KEY_SONG_COUNTS = "key_song_counts"
@@ -248,7 +252,7 @@ class AppPreferences(context: Context) {
 
     var appTheme: String
         get() {
-            val stored = prefs.getString(KEY_APP_THEME, "sunset") ?: "sunset"
+            val stored = prefs.getString(KEY_APP_THEME, "dark") ?: "dark"
             return when (stored) {
                 "light", "pearl_white" -> "light"
                 "dark", "midnight_onyx", "cyberpunk_neon", "emerald_obsidian" -> "dark"
@@ -261,7 +265,7 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit().putString(KEY_APP_THEME, value).apply()
 
     var customThemeColor: String
-        get() = prefs.getString(KEY_CUSTOM_THEME_COLOR, "#FFFFFF") ?: "#FFFFFF"
+        get() = prefs.getString(KEY_CUSTOM_THEME_COLOR, "#000000") ?: "#000000"
         set(value) = prefs.edit().putString(KEY_CUSTOM_THEME_COLOR, value.trim()).apply()
 
     var orbAnimation: String
@@ -420,4 +424,31 @@ class AppPreferences(context: Context) {
     fun clearChatHistory() {
         prefs.edit().remove(KEY_CHAT_HISTORY).apply()
     }
+
+    fun loadChatSessions(): List<ChatSession> {
+        val json = prefs.getString(KEY_CHAT_SESSIONS, null) ?: return emptyList()
+        return try {
+            val type = object : TypeToken<List<ChatSession>>() {}.type
+            gson.fromJson<List<ChatSession>>(json, type) ?: emptyList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Stored conversation sessions were invalid; starting fresh", e)
+            emptyList()
+        }
+    }
+
+    fun saveChatSessions(sessions: List<ChatSession>) {
+        prefs.edit().putString(KEY_CHAT_SESSIONS, gson.toJson(sessions)).apply()
+    }
+
+    fun clearChatSessions() {
+        prefs.edit().remove(KEY_CHAT_SESSIONS).apply()
+    }
+
+    var activeChatSessionId: String
+        get() = prefs.getString(KEY_ACTIVE_CHAT_SESSION, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_ACTIVE_CHAT_SESSION, value).apply()
+
+    var hasSpokenWelcome: Boolean
+        get() = prefs.getBoolean(KEY_WELCOME_SPOKEN, false)
+        set(value) = prefs.edit().putBoolean(KEY_WELCOME_SPOKEN, value).apply()
 }

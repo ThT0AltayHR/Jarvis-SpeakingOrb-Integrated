@@ -10,11 +10,16 @@
     * { box-sizing: border-box; }
     html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:transparent; }
     body { display:flex; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent; }
-    #orbRoot { position:relative; width:min(78vw, 320px); aspect-ratio:1; max-width:100%; max-height:100%; margin:auto; }
-    speaking-orb { display:block; width:100%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
-    #thinkingOrbCanvas { position:absolute; inset:0; display:block; width:100%; height:100%; opacity:0; visibility:hidden; pointer-events:none; z-index:2; transition:opacity 180ms ease; }
+    #orbRoot { position:relative; width:min(78vw, 320px); height:100%; aspect-ratio:auto; max-width:100%; max-height:100%; margin:auto; }
+    speaking-orb { display:block; position:absolute; left:14%; bottom:0; width:72%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
+    #thinkingOrbCanvas { position:absolute; left:50%; top:1%; transform:translateX(-50%); display:block; width:min(25vw, 96px); height:min(25vw, 96px); opacity:0; visibility:hidden; pointer-events:none; z-index:2; transition:opacity 180ms ease; }
     #orbRoot.thinking-active #thinkingOrbCanvas { opacity:1; visibility:visible; }
-    #orbRoot.thinking-active speaking-orb { opacity:0; }
+    /* Reserve a separate status area above the scaled-down main sphere; the two canvases do not cover each other. */
+    #orbRoot.thinking-active speaking-orb { opacity:1; }
+    @media (max-height:320px) {
+      speaking-orb { left:16%; width:68%; }
+      #thinkingOrbCanvas { width:68px; height:68px; }
+    }
     @media (prefers-reduced-motion: reduce) {
       speaking-orb, #thinkingOrbCanvas { transition:none; }
     }
@@ -24,7 +29,7 @@
 </head>
 <body>
   <div id="orbRoot">
-    <speaking-orb id="jarvisOrb" state="done" particles="6000" rest="listening"></speaking-orb>
+    <speaking-orb id="jarvisOrb" state="done" rest="listening"></speaking-orb>
     <canvas id="thinkingOrbCanvas" aria-label="Jarvis düşünüyor" role="img"></canvas>
   </div>
   <script>
@@ -72,6 +77,9 @@
       let cssSize = 0;
       let dpr = 1;
       let animationFrame = 0;
+      let lastThinkingDrawMs = 0;
+      const isAndroidWebView = /Android/i.test(navigator.userAgent || '');
+      const thinkingFrameIntervalMs = isAndroidWebView ? (1000 / 30) : (1000 / 45);
       let completionToken = 0;
       let terminalTimer = 0;
       let isThinkingVisible = false;
@@ -81,6 +89,7 @@
         currentText = '';
         if (orb) orb.line = null;
         if (orb && orb.capEl) { orb.capEl.textContent = ''; orb.capEl.classList.remove('user'); }
+        if (orb && typeof orb.clearCaptionDust === 'function') orb.clearCaptionDust();
       };
 
       function desiredAnimation() {
@@ -88,6 +97,7 @@
         if (taskAnimation && taskIsActive) return taskAnimation;
         if (primaryState === 'searching') return 'searching';
         if (primaryState === 'thinking') return 'working';
+        if (primaryState === 'listening') return 'listening';
         return null;
       }
 
@@ -110,21 +120,28 @@
       function thinkingLoop(nowMs) {
         animationFrame = 0;
         if (!isThinkingVisible || document.visibilityState === 'hidden') return;
-        drawThinkingFrame(nowMs);
+        if (!lastThinkingDrawMs || nowMs - lastThinkingDrawMs >= thinkingFrameIntervalMs) {
+          drawThinkingFrame(nowMs);
+          lastThinkingDrawMs = nowMs;
+        }
         if (!reducedMotion) animationFrame = requestAnimationFrame(thinkingLoop);
       }
 
       function startThinkingLoop() {
         stopThinkingLoop();
         if (!isThinkingVisible) return;
+        lastThinkingDrawMs = 0;
         drawThinkingFrame(performance.now());
+        lastThinkingDrawMs = performance.now();
         if (!reducedMotion && document.visibilityState !== 'hidden') animationFrame = requestAnimationFrame(thinkingLoop);
       }
 
       function resizeThinkingCanvas() {
         if (!thinkingCanvas || !root) return;
-        const nextSize = Math.max(1, Math.floor(root.clientWidth || 240));
-        const nextDpr = Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
+        const nextSize = Math.max(1, Math.floor(thinkingCanvas.clientWidth || root.clientWidth * 0.72 || 180));
+        const deviceDpr = Math.max(1, Number(window.devicePixelRatio) || 1);
+        // The status layer is decorative; avoid large high-DPI canvases on mobile GPUs.
+        const nextDpr = Math.min(isAndroidWebView ? 1.35 : 2, deviceDpr);
         if (nextSize === cssSize && nextDpr === dpr) return;
         cssSize = nextSize;
         dpr = nextDpr;
@@ -134,21 +151,19 @@
       }
 
       function refreshThinkingVisibility() {
-        const taskCanShow = taskIsActive && primaryState !== 'speaking';
-        const shouldShow = !!(forcedAnimation || primaryState === 'thinking' || primaryState === 'searching' || taskCanShow);
+        const taskCanShow = taskIsActive && (!terminalTaskStates.has(taskState) || primaryState !== 'speaking');
+        const shouldShow = !!(forcedAnimation || primaryState === 'listening' || primaryState === 'thinking' || primaryState === 'searching' || taskCanShow);
         const wasShowing = isThinkingVisible;
         const state = desiredAnimation();
         root.classList.toggle('thinking-active', shouldShow);
         isThinkingVisible = shouldShow;
         if (thinkingCanvas) thinkingCanvas.setAttribute('aria-label', animationLabels[state] || 'Jarvis düşünüyor');
         if (shouldShow) {
-          if (!wasShowing && orb && typeof orb.pause === 'function') orb.pause();
           resizeThinkingCanvas();
           if (!wasShowing || (!animationFrame && document.visibilityState !== 'hidden' && !reducedMotion)) startThinkingLoop();
           else drawThinkingFrame(performance.now());
         } else {
           stopThinkingLoop();
-          if (wasShowing && orb && typeof orb.resume === 'function') orb.resume();
           if (thinkingContext && thinkingCanvas) {
             thinkingContext.setTransform(1, 0, 0, 1, 0, 0);
             thinkingContext.clearRect(0, 0, thinkingCanvas.width, thinkingCanvas.height);
@@ -215,7 +230,7 @@
         if (!orb || !orb.estimate) return;
         if (!currentText || !next.startsWith(currentText)) {
           currentText = '';
-          orb.line = { toks:[], words:[], t0:orb.time, live:true, who:'assistant' };
+          orb.line = { toks:[], words:[], t0:0, live:true, who:'assistant', externalSync:true };
         }
         let delta = next.slice(currentText.length);
         if (delta && currentText && !/^\s/.test(delta)) {
@@ -224,6 +239,7 @@
           if (line && line.words.length && !/\s/.test(delta)) {
             const last = line.words[line.words.length - 1];
             last.w += delta;
+            if (line.externalSync) last.end = Math.max(last.end, (Number(orb.externalAudioTime) || 0) + 0.12);
             line.toks[line.toks.length - 1] = last.w;
             currentText = next;
             line.groups = null;
@@ -235,7 +251,14 @@
         const tokens = delta.trim().split(/\s+/).filter(Boolean);
         if (tokens.length) {
           const line = orb.line;
-          let t = line.words.length ? line.words[line.words.length - 1].end + 0.025 : Math.max(0, orb.time - line.t0);
+          const playbackTime = line.externalSync ? Math.max(0, Number(orb.externalAudioTime) || 0) : Math.max(0, orb.time - line.t0);
+          const lastWord = line.words[line.words.length - 1];
+          let t = lastWord ? lastWord.end + 0.025 : playbackTime;
+          if (line.externalSync && lastWord && playbackTime > lastWord.end + 0.06) {
+            // Re-anchor each newly heard transcript chunk to the real AudioTrack playhead.
+            // This stops estimated syllable lengths accumulating visible caption drift.
+            t = Math.max(lastWord.start + 0.05, playbackTime - 0.08);
+          }
           line.words.push(...orb.estimate(tokens, t));
           line.toks.push(...tokens);
           line.groups = null;
@@ -274,7 +297,14 @@
           root.style.filter = `hue-rotate(${Math.round((h-35+360)%360)}deg) saturate(1.15)`;
           if (isThinkingVisible) drawThinkingFrame(performance.now());
         },
-        setExternalAudio: (amp, bass, high) => { if (orb) orb.level = Math.max(0, Math.min(1, Number(amp) || 0)); },
+        setExternalAudio: (amp, bass, high, playbackMs, playbackActive) => {
+          if (!orb) return;
+          orb.level = Math.max(0, Math.min(1, Number(amp) || 0));
+          orb.externalAudioLevel = orb.level;
+          orb.externalAudioActive = typeof playbackActive === 'boolean' ? playbackActive : true;
+          const clockMs = Number(playbackMs);
+          if (Number.isFinite(clockMs) && clockMs >= 0) orb.externalAudioTime = clockMs / 1000;
+        },
         setCaption: value => { if (!orb || !orb.capEl) return; clearText(); orb.capEl.textContent = safeText(value); },
         appendText,
         clearCaption: clearText

@@ -38,7 +38,7 @@ object BuiltInChromeEngine {
             val request = Request.Builder()
                 .url(searchUrl)
                 .header("User-Agent", USER_AGENT)
-                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
                 .build()
 
             val response = httpClient.newCall(request).execute()
@@ -50,7 +50,7 @@ object BuiltInChromeEngine {
             }
 
             // Fallback: Google HTML Search parsing
-            val googleUrl = "https://www.google.com/search?q=$encodedQuery&hl=en"
+            val googleUrl = "https://www.google.com/search?q=$encodedQuery&hl=tr"
             val googleReq = Request.Builder()
                 .url(googleUrl)
                 .header("User-Agent", USER_AGENT)

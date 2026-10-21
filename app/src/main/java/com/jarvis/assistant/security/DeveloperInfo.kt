@@ -1,4 +1,4 @@
-package com.jarvis.assistant.security
+package com.jarvisai.app.security
 
 /**
  * Permanent Developer Identity — Tech GPTx
@@ -11,6 +11,6 @@ object DeveloperInfo {
     const val GITHUB_URL          = "https://github.com/techgptx/Playlist"
     const val LICENSE             = "TAMCL v1.0"
     const val LICENSE_DETAIL      = "Content creators MUST credit Tech GPTx in any video using this code."
-    const val APP_OFFICIAL_ID     = "com.jarvis.assistant"
+    const val APP_OFFICIAL_ID     = "com.jarvisai.app"
     const val VERIFIED_DEVELOPER  = "Tech GPTx — Official JARVIS Tutorial Series"
 }

@@ -54,7 +54,10 @@ class CommandExecutor(
             is JarvisCommand.OpenApp -> phoneManager.openApp(command.packageName)
             is JarvisCommand.OpenWebUrls -> phoneManager.openMultipleUrls(command.urls)
             is JarvisCommand.PhoneCall -> phoneManager.makePhoneCall(command.contactOrNumber)
-            is JarvisCommand.SearchWeb -> phoneManager.searchWeb(command.query)
+            // Generic web research stays in the background and returns extracted snippets.
+            is JarvisCommand.SearchWeb -> com.jarvis.assistant.util.BuiltInChromeEngine.searchAndExtract(command.query)
+            // The user explicitly asked for a browser/Chrome search, so launch it on-device.
+            is JarvisCommand.SearchWebInBrowser -> phoneManager.searchWeb(command.query)
 
             // WhatsApp
             is JarvisCommand.WhatsAppMessage -> whatsappAssistant.sendMessageDirectly(command.contact, command.message)

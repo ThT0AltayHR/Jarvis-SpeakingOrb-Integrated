@@ -45,6 +45,7 @@ class HomeFragment : Fragment() {
     private var pendingThemeKey: String? = null
     private var pendingCustomHex: String? = null
     private var lastAudioPushTime = 0L
+    private var lastAutoNavigatedSearchState: String? = null
     private var taskFallbackPanel: android.widget.LinearLayout? = null
     private var taskFallbackText: android.widget.TextView? = null
 
@@ -247,14 +248,14 @@ class HomeFragment : Fragment() {
         }
     }
 
-    private fun pushExternalAudio(amp: Float, bass: Float, high: Float) {
+    private fun pushExternalAudio(amp: Float, bass: Float, high: Float, playbackPositionMs: Long, playbackActive: Boolean) {
         if (!isPageLoaded) return
         val now = System.currentTimeMillis()
         if (now - lastAudioPushTime < 33L) return // ~30 calls per second throttle
         lastAudioPushTime = now
         activity?.runOnUiThread {
             val webView = _binding?.orbWebView ?: return@runOnUiThread
-            webView.evaluateJavascript("window.JarvisOrb && window.JarvisOrb.setExternalAudio($amp, $bass, $high);", null)
+            webView.evaluateJavascript("window.JarvisOrb && window.JarvisOrb.setExternalAudio($amp, $bass, $high, $playbackPositionMs, $playbackActive);", null)
         }
     }
 
@@ -365,10 +366,29 @@ class HomeFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
-                    com.jarvis.assistant.automation.agent.AgentTaskEngine.taskState.collect { snapshot ->
-                        renderTaskFallback(snapshot)
-                        setOrbTaskState(snapshot?.currentStatus ?: "IDLE")
-                    }
+                    combine(
+                        com.jarvis.assistant.automation.agent.AgentTaskEngine.taskState,
+                        JarvisConversationService.webSearchState
+                    ) { snapshot, webSearchState -> snapshot to webSearchState }
+                        .collect { (snapshot, webSearchState) ->
+                            renderTaskFallback(snapshot)
+                            val status = if (!webSearchState.equals("IDLE", ignoreCase = true)) {
+                                webSearchState
+                            } else {
+                                snapshot?.currentStatus ?: "IDLE"
+                            }
+                            setOrbTaskState(status)
+                            if (webSearchState.equals("IDLE", ignoreCase = true) || webSearchState.equals("OBSERVING", ignoreCase = true)) {
+                                lastAutoNavigatedSearchState = null
+                            } else if (isResumed &&
+                                (webSearchState.equals("COMPLETED", ignoreCase = true) || webSearchState.equals("FAILED", ignoreCase = true)) &&
+                                lastAutoNavigatedSearchState != webSearchState) {
+                                // Show the completed background search in chat once, without forcing
+                                // the user back to chat if they manually return to Home afterward.
+                                lastAutoNavigatedSearchState = webSearchState
+                                (activity as? MainActivity)?.selectTab(MainActivity.TAB_CHAT)
+                            }
+                        }
                 }
                 launch {
                     val screenCapture = com.jarvis.assistant.vision.ScreenCaptureManager.getInstance()
@@ -467,11 +487,10 @@ class HomeFragment : Fragment() {
                 }
 
                 launch {
-                    viewModel.audioFrequency.collect { freq ->
-                        val amp = freq.amplitude
-                        val bass = freq.bass
-                        val high = freq.high
-                        pushExternalAudio(amp, bass, high)
+                    combine(viewModel.audioFrequency, viewModel.audioPlaybackPositionMs, viewModel.audioPlaybackActive) { freq, playbackMs, active ->
+                        Triple(freq, playbackMs, active)
+                    }.collect { (freq, playbackMs, active) ->
+                        pushExternalAudio(freq.amplitude, freq.bass, freq.high, playbackMs, active)
                     }
                 }
 

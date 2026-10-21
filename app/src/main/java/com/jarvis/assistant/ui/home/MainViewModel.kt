@@ -47,6 +47,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val conversationState: StateFlow<ConversationState> = JarvisConversationService.conversationState
     val audioLevel: StateFlow<Float> = JarvisConversationService.audioLevel
     val audioFrequency: StateFlow<com.jarvis.assistant.audio.AudioFrequencyData> = JarvisConversationService.audioFrequency
+    val audioPlaybackPositionMs: StateFlow<Long> = JarvisConversationService.audioPlaybackPositionMs
+    val audioPlaybackActive: StateFlow<Boolean> = JarvisConversationService.audioPlaybackActive
     val liveUserTranscript: StateFlow<String> = JarvisConversationService.liveUserTranscript
     val liveAssistantResponse: StateFlow<String> = JarvisConversationService.liveAssistantResponse
     val liveError: StateFlow<com.jarvis.assistant.background.JarvisLiveError?> = JarvisConversationService.liveError

@@ -16,6 +16,7 @@ sealed class JarvisCommand {
     data class Forget(val query: String) : JarvisCommand()
     object WhatDoYouRemember : JarvisCommand()
     data class SearchWeb(val query: String) : JarvisCommand()
+    data class SearchWebInBrowser(val query: String) : JarvisCommand()
     data class OpenWebUrls(val urls: List<String>) : JarvisCommand()
     data class PhoneCall(val contactOrNumber: String) : JarvisCommand()
     object PauseMedia : JarvisCommand()
