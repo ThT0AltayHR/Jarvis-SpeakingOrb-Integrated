@@ -91,6 +91,7 @@ class JarvisConversationService : Service() {
         const val ACTION_START_CONVERSATION = "com.jarvis.assistant.START_CONVERSATION"
         const val ACTION_STOP_ALL = "com.jarvis.assistant.STOP_ALL"
         const val ACTION_ENTER_STANDBY = "com.jarvis.assistant.ENTER_STANDBY"
+        const val EXTRA_FIRST_WELCOME_TEXT = "com.jarvis.assistant.EXTRA_FIRST_WELCOME_TEXT"
 
         private const val CHANNEL_ID = "jarvis_conversation"
         private const val NOTIFICATION_ID = 41
@@ -601,6 +602,10 @@ class JarvisConversationService : Service() {
     private var standbyActivatedTime = 0L
     @Volatile
     private var isPendingWakeGreeting = false
+    @Volatile
+    private var pendingModelWelcomeText: String? = null
+    @Volatile
+    private var pendingWelcomeAudio = false
     private var headsetAudioRouter: com.jarvis.assistant.audio.HeadsetAudioRouter? = null
 
     override fun onCreate() {
@@ -777,7 +782,12 @@ class JarvisConversationService : Service() {
 
         when (intent?.action) {
             ACTION_START_CONVERSATION -> {
-                com.jarvis.assistant.audio.JarvisSoundEffects.playWakeSound()
+                val firstWelcome = intent.getStringExtra(EXTRA_FIRST_WELCOME_TEXT)?.trim().orEmpty()
+                if (firstWelcome.isNotBlank()) {
+                    pendingModelWelcomeText = firstWelcome
+                } else {
+                    com.jarvis.assistant.audio.JarvisSoundEffects.playWakeSound()
+                }
                 beginActiveConversation()
             }
             ACTION_ENTER_STANDBY -> enterStandby(announce = false)
@@ -884,6 +894,10 @@ class JarvisConversationService : Service() {
                 _audioPlaybackActive.value = isPlaying
                 if (isPlaying) {
                     _audioPlaybackPositionMs.value = 0L
+                    if (pendingWelcomeAudio) {
+                        pendingWelcomeAudio = false
+                        (application as? JarvisApp)?.preferences?.hasSpokenWelcome = true
+                    }
                     setConversationState(ConversationState.SPEAKING)
                 } else {
                     lastPlaybackEndTime = System.currentTimeMillis()
@@ -946,7 +960,18 @@ class JarvisConversationService : Service() {
                                 if (_conversationState.value != ConversationState.SPEAKING && _conversationState.value != ConversationState.THINKING) {
                                     setConversationState(ConversationState.IDLE)
                                 }
-                                if (isPendingWakeGreeting) {
+                                val firstWelcome = pendingModelWelcomeText
+                                if (!firstWelcome.isNullOrBlank()) {
+                                    val welcomePrompt = """
+                                        [JARVIS FIRST-OPEN WELCOME]
+                                        Speak the following Turkish welcome aloud through the configured Gemini Live voice. This is a short spoken greeting, not an explanation of an instruction. Say it naturally and only once, in Turkish:
+                                        $firstWelcome
+                                    """.trimIndent()
+                                    if (liveWebSocket?.sendClientContent(welcomePrompt) == true) {
+                                        pendingModelWelcomeText = null
+                                        pendingWelcomeAudio = true
+                                    }
+                                } else if (isPendingWakeGreeting) {
                                     isPendingWakeGreeting = false
                                     if (!hasSpeechInCurrentUtterance) {
                                         liveWebSocket?.sendClientContent("Hey Jarvis")
@@ -3405,6 +3430,7 @@ class JarvisConversationService : Service() {
     // ---------------------------------------------------------------------
 
     private fun fullStop() {
+        pendingWelcomeAudio = false
         stopActiveConversation()
         exitStandbyListening()
         _isStandby.value = false

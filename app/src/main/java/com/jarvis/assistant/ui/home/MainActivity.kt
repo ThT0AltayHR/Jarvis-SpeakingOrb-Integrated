@@ -5,9 +5,6 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.tts.TextToSpeech
 import android.view.View
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -31,7 +28,6 @@ import com.jarvis.assistant.util.PermissionHelper
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -45,7 +41,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     val viewModel: MainViewModel by viewModels()
     private var activeSnackbar: Snackbar? = null
-    private var welcomeTts: TextToSpeech? = null
     private var welcomeSpeechRequested = false
 
     private var currentTab = TAB_HOME
@@ -299,47 +294,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun speakFirstWelcome(name: String) {
         if (welcomeSpeechRequested || name.isBlank() || JarvisConversationService.isServiceRunning()) return
+        val prefs = com.jarvis.assistant.JarvisApp.instance.preferences
+        // A model-generated greeting needs the same live audio path as ordinary Jarvis speech.
+        // Leave it pending when credentials or required permissions are absent so it can retry later.
+        if (prefs.apiKey.isBlank() || !PermissionHelper.hasAllRequiredPermissions(this)) return
         welcomeSpeechRequested = true
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (isFinishing || isDestroyed) {
-                welcomeSpeechRequested = false
-                return@postDelayed
-            }
-            try {
-                welcomeTts = TextToSpeech(applicationContext) { status ->
-                    if (status == TextToSpeech.SUCCESS) {
-                        val engine = welcomeTts
-                        if (engine == null) {
-                            welcomeSpeechRequested = false
-                        } else {
-                            val languageResult = engine.setLanguage(Locale.forLanguageTag("tr-TR"))
-                            if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                                engine.setLanguage(Locale.getDefault())
-                            }
-                            engine.setSpeechRate(1.0f)
-                            val greeting = "Hey, merhaba $name. Bugün sana nasıl yardımcı olabilirim? İstersen sohbet edebiliriz veya sohbet panelini açıp yapmak istediğin görevleri bana anlatabilirsin."
-                            val result = engine.speak(greeting, TextToSpeech.QUEUE_FLUSH, null, "jarvis_first_welcome")
-                            if (result == TextToSpeech.SUCCESS) {
-                                com.jarvis.assistant.JarvisApp.instance.preferences.hasSpokenWelcome = true
-                            } else {
-                                welcomeSpeechRequested = false
-                            }
-                        }
-                    } else {
-                        welcomeSpeechRequested = false
-                    }
-                }
-            } catch (_: Exception) {
-                welcomeSpeechRequested = false
-            }
-        }, 650L)
-    }
-
-    override fun onDestroy() {
-        welcomeTts?.stop()
-        welcomeTts?.shutdown()
-        welcomeTts = null
-        super.onDestroy()
+        val greeting = "Hey, merhaba $name. Bugün sana nasıl yardımcı olabilirim? İstersen sohbet edebiliriz veya sohbet panelini açıp yapmak istediğin görevleri bana anlatabilirsin."
+        val intent = Intent(this, JarvisConversationService::class.java).apply {
+            action = JarvisConversationService.ACTION_START_CONVERSATION
+            putExtra(JarvisConversationService.EXTRA_FIRST_WELCOME_TEXT, greeting)
+        }
+        try {
+            ContextCompat.startForegroundService(this, intent)
+        } catch (e: Exception) {
+            welcomeSpeechRequested = false
+            android.util.Log.e("MainActivity", "Could not start model-voice welcome: ${e.message}", e)
+        }
     }
 
     private fun setupNavigationDock() {

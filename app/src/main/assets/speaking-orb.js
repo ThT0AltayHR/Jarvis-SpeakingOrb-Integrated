@@ -88,7 +88,7 @@
   const CSS = `:host{display:block;width:100%;position:relative;contain:layout paint;--cap:#fff;--cap-dim:rgba(255,255,255,.52)}
     .orb{position:relative;width:100%;aspect-ratio:1}
     canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-    .cap{position:relative;margin:-4% auto 0;width:var(--cap-w,92%);min-height:2.7em;text-align:center;font:600 var(--cap-size,24px)/1.3 var(--cap-font,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);letter-spacing:-.01em;color:var(--cap);text-wrap:balance}
+    .cap{position:relative;margin:-2% auto 0;width:var(--cap-w,98%);max-width:100%;min-height:2.4em;text-align:center;font:600 var(--cap-size,28px)/1.25 var(--cap-font,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);letter-spacing:-.015em;color:var(--cap);text-wrap:balance;overflow-wrap:anywhere}
     .cap.user{--cap:#ffd6a8;font-weight:500}
     .cap span{display:inline-block;white-space:pre;will-change:opacity,transform}
     canvas.fx{pointer-events:none}`;
@@ -108,7 +108,7 @@
       this.weights=names.map(n=>n===this.state?1:0); this.time=0; this.last=0; this.slow=0; this.env=0; this.onsets=[]; this.line=null;
       this.externalAudioTime=0; this.externalAudioLevel=0; this.externalAudioActive=false;
       this.resize=()=>{const w=this.canvas.parentNode.getBoundingClientRect().width,dpr=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2),size=Math.max(1,Math.round(w*dpr));
-        this.canvas.width=this.canvas.height=this.dots.width=this.dots.height=size;this.style.setProperty('--cap-size',Math.round(clamp(w*.066,18,34))+'px');
+        this.canvas.width=this.canvas.height=this.dots.width=this.dots.height=size;this.style.setProperty('--cap-size',Math.round(clamp(w*.074,22,36))+'px');
         const hr=this.getBoundingClientRect(),k=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2);this.fx.width=Math.round(hr.width*k);this.fx.height=Math.round(hr.height*k);this.glyphCache=new Map();this.draw(this.time);};
       this.observer=new ResizeObserver(this.resize);this.observer.observe(this);this.resize();
       this.onMotion=()=>{const resume=!this.suspended;this.pause();if(resume)this.resume();};
@@ -227,7 +227,7 @@
         for(const i of G[gi]){const s=document.createElement('span');s.textContent=W[i].w+' ';el.append(s);}}
       const reduce=this.media?.matches;
       [...el.children].forEach((s,k)=>{
-        const w=W[G[gi][k]],fly=!reduce&&L.who!=='user';
+        const w=W[G[gi][k]],fly=L.who!=='user';
         // AI words are built from particles first, the real text shows up as they land
         const a=reduce?(t>=w.start?1:0):fly?ease(clamp((t-w.start-.3)/.14)):ease(clamp((t-w.start+.04)/.14));
         const on=t>=w.start-.04&&t<w.end+.12;
@@ -235,7 +235,7 @@
         s.style.transform=fly?'':`translateY(${((1-a)*.25).toFixed(3)}em)`;
         s.style.color=on?'var(--cap)':'';
       });
-      this.flight(t,L.who==='user'||reduce?[]:G[gi].map((i,k)=>[W[i],el.children[k]]));
+      this.flight(t,L.who==='user'?[]:G[gi].map((i,k)=>[W[i],el.children[k]]));
     }
 
     // glyph points of one word, sampled from the caption font, relative to its span box
@@ -245,10 +245,23 @@
       const w=Math.ceil(r.width)+4,h=Math.ceil(r.height),c=document.createElement('canvas');c.width=w;c.height=h;
       const g=c.getContext('2d');g.font=font;g.fillStyle='#fff';
       // same baseline as the DOM span: half-leading + font ascent
-      const m=g.measureText(word),A=m.fontBoundingBoxAscent,D=m.fontBoundingBoxDescent;
-      g.fillText(word,0,(h-(A+D))/2+A);
-      const d=g.getImageData(0,0,w,h).data,pts=[],fs=parseFloat(cs.fontSize),step=Math.max(1,fs/22);
-      for(let y=0;y<h;y+=step)for(let x=0;x<w;x+=step){const i=((y|0)*w+(x|0))*4+3;if(d[i]>140)pts.push([x,y]);}
+      const m=g.measureText(word),fs=Math.max(1,parseFloat(cs.fontSize)||24);
+      // Older Android System WebView builds do not implement fontBoundingBoxAscent/Descent.
+      // Using undefined values here made the baseline NaN, leaving the particle glyph empty.
+      const A=Number.isFinite(m.fontBoundingBoxAscent)?m.fontBoundingBoxAscent:
+        (Number.isFinite(m.actualBoundingBoxAscent)?m.actualBoundingBoxAscent:fs*.78);
+      const D=Number.isFinite(m.fontBoundingBoxDescent)?m.fontBoundingBoxDescent:
+        (Number.isFinite(m.actualBoundingBoxDescent)?m.actualBoundingBoxDescent:fs*.22);
+      const baseline=Math.max(1,Math.min(h-1,(h-(A+D))/2+A));
+      g.fillText(word,0,baseline);
+      const d=g.getImageData(0,0,w,h).data,pts=[],step=Math.max(1,fs/22);
+      for(let y=0;y<h;y+=step)for(let x=0;x<w;x+=step){const i=((y|0)*w+(x|0))*4+3;if(d[i]>80)pts.push([x,y]);}
+      // If a platform still produces no raster points, retry with an explicit baseline and denser sampling.
+      if(!pts.length){
+        g.clearRect(0,0,w,h);g.textBaseline='alphabetic';g.fillText(word,0,Math.max(fs,Math.min(h-1,h*.78)));
+        const retry=g.getImageData(0,0,w,h).data;
+        for(let y=0;y<h;y+=Math.max(1,fs/30))for(let x=0;x<w;x+=Math.max(1,fs/30)){const i=((y|0)*w+(x|0))*4+3;if(retry[i]>40)pts.push([x,y]);}
+      }
       this.glyphCache.set(key,pts);return pts;
     }
     flight(t,items){
@@ -259,11 +272,12 @@
       const cx=orb.left-hr.left+orb.width/2,cy=orb.top-hr.top+orb.height/2,R=orb.width*.25;
       const rnd=n=>{const x=Math.sin(n*12.9898)*43758.5453;return x-Math.floor(x);};
       g.setTransform(k,0,0,k,0,0);g.globalCompositeOperation='lighter';
-      const [cr,cg,cb]=colors[SPK],dot=Math.max(1,parseFloat(getComputedStyle(this.capEl).fontSize)/24);
+      const [cr,cg,cb]=colors[SPK],dot=Math.max(1.15,parseFloat(getComputedStyle(this.capEl).fontSize)/21);
       items.forEach(([w,span],wi)=>{
         const age=t-w.start+.06;if(age<0||age>.72||!span)return;
         const pts=this.glyphs(w.w,span),sr=span.getBoundingClientRect(),ox=sr.left-hr.left,oy=sr.top-hr.top,seed=w.start*977+wi;
-        for(let j=0;j<pts.length;j++){
+        const pointStride=this.media?.matches?3:1;
+        for(let j=0;j<pts.length;j+=pointStride){
           const r1=rnd(seed+j*1.7),r2=rnd(seed+j*3.1+.3),r3=rnd(seed+j*5.3+.7),del=r1*.12,p=clamp((age-del)/.36);
           if(p<=0)continue;
           const land=clamp((age-del-.34)/.1),al=(1-land)*Math.min(1,p*5);if(al<=0)continue;

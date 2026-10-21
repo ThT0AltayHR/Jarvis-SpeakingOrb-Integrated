@@ -3,42 +3,33 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <meta name="color-scheme" content="dark light">
+  <meta name="color-scheme" content="dark">
   <title>Jarvis</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:transparent; }
     body { display:flex; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent; }
-    #orbRoot { position:relative; width:min(78vw, 320px); height:100%; aspect-ratio:auto; max-width:100%; max-height:100%; margin:auto; }
-    speaking-orb { display:block; position:absolute; left:14%; bottom:0; width:72%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
-    #thinkingOrbCanvas { position:absolute; left:50%; top:1%; transform:translateX(-50%); display:block; width:min(25vw, 96px); height:min(25vw, 96px); opacity:0; visibility:hidden; pointer-events:none; z-index:2; transition:opacity 180ms ease; }
-    #orbRoot.thinking-active #thinkingOrbCanvas { opacity:1; visibility:visible; }
-    /* Reserve a separate status area above the scaled-down main sphere; the two canvases do not cover each other. */
-    #orbRoot.thinking-active speaking-orb { opacity:1; }
-    @media (max-height:320px) {
-      speaking-orb { left:16%; width:68%; }
-      #thinkingOrbCanvas { width:68px; height:68px; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      speaking-orb, #thinkingOrbCanvas { transition:none; }
-    }
+    #orbRoot { position:relative; width:min(94vw, 420px); height:100%; aspect-ratio:auto; max-width:100%; max-height:100%; margin:auto; }
+    speaking-orb { display:block; position:absolute; left:0; bottom:0; width:100%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
+    @media (max-height:320px) { #orbRoot { width:min(88vw, 300px); } }
+    @media (prefers-reduced-motion: reduce) { speaking-orb { transition:none; } }
   </style>
-  <script src="thinking-orb-engine.js" defer></script>
   <script src="speaking-orb.js" defer></script>
 </head>
 <body>
   <div id="orbRoot">
     <speaking-orb id="jarvisOrb" state="done" rest="listening"></speaking-orb>
-    <canvas id="thinkingOrbCanvas" aria-label="Jarvis düşünüyor" role="img"></canvas>
   </div>
   <script>
     (() => {
       'use strict';
       const orb = document.getElementById('jarvisOrb');
       const root = document.getElementById('orbRoot');
-      const thinkingCanvas = document.getElementById('thinkingOrbCanvas');
-      const thinkingContext = thinkingCanvas ? thinkingCanvas.getContext('2d', { alpha:true }) : null;
+      // The home screen intentionally uses one enlarged Speaking Orb. The nine task
+      // animations remain available in the chat UI; no second canvas covers the sphere here.
+      const thinkingCanvas = null;
+      const thinkingContext = null;
       const safeText = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
       const animationNames = new Set(['working','searching','solving','listening','connecting','weaving','composing','breathing','shaping']);
       const terminalTaskStates = new Set(['completed','failed','blocked','cancelled']);
@@ -151,24 +142,11 @@
       }
 
       function refreshThinkingVisibility() {
-        const taskCanShow = taskIsActive && (!terminalTaskStates.has(taskState) || primaryState !== 'speaking');
-        const shouldShow = !!(forcedAnimation || primaryState === 'listening' || primaryState === 'thinking' || primaryState === 'searching' || taskCanShow);
-        const wasShowing = isThinkingVisible;
-        const state = desiredAnimation();
-        root.classList.toggle('thinking-active', shouldShow);
-        isThinkingVisible = shouldShow;
-        if (thinkingCanvas) thinkingCanvas.setAttribute('aria-label', animationLabels[state] || 'Jarvis düşünüyor');
-        if (shouldShow) {
-          resizeThinkingCanvas();
-          if (!wasShowing || (!animationFrame && document.visibilityState !== 'hidden' && !reducedMotion)) startThinkingLoop();
-          else drawThinkingFrame(performance.now());
-        } else {
-          stopThinkingLoop();
-          if (thinkingContext && thinkingCanvas) {
-            thinkingContext.setTransform(1, 0, 0, 1, 0, 0);
-            thinkingContext.clearRect(0, 0, thinkingCanvas.width, thinkingCanvas.height);
-          }
-        }
+        // This screen has one deliberately large sphere; task animations are shown in Chat.
+        // Keep the task-state bridge for native callers, but do not allocate or animate a second canvas.
+        isThinkingVisible = false;
+        stopThinkingLoop();
+        if (root) root.classList.remove('thinking-active');
       }
 
       function clearTerminalTimer() {

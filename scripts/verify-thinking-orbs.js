@@ -73,12 +73,12 @@ assert.match(orbHtml, /externalSync:\s*true/,
   'live assistant captions should use the hardware playback clock');
 assert.match(orbHtml, /clearCaptionDust/,
   'caption clearing should explicitly clear the particle canvas');
-assert.match(orbHtml, /left:50%; top:1%;[^}]*width:min\(25vw, 96px\); height:min\(25vw, 96px\)/,
-  'thinking animation should occupy a reserved status area above the speaking sphere');
-assert.match(orbHtml, /speaking-orb \{ display:block; position:absolute; left:14%; bottom:0; width:72%/,
-  'main speaking sphere should remain visible below the status area');
-assert.doesNotMatch(orbHtml, /speaking-orb\s*\{\s*opacity:0/,
-  'thinking animation must not hide the speaking orb');
+assert.doesNotMatch(orbHtml, /thinkingOrbCanvas|<canvas[^>]*thinking/i,
+  'the Home screen should not mount a second animation canvas over/above the main sphere');
+assert.match(orbHtml, /#orbRoot \{ position:relative; width:min\(94vw, 420px\)/,
+  'the primary Home orb should use the enlarged available stage');
+assert.match(orbHtml, /speaking-orb \{ display:block; position:absolute; left:0; bottom:0; width:100%/,
+  'the main sphere should fill the Home orb stage');
 const speakingOrbSource = fs.readFileSync(path.join(assets, 'speaking-orb.js'), 'utf8');
 assert.match(speakingOrbSource, /const autoCount = \(\) => matchMedia\('\(pointer: coarse\)'\)\.matches \? 2800 : 8000/,
   'mobile particle density should be bounded for smooth rendering');
@@ -86,10 +86,12 @@ assert.match(speakingOrbSource, /this\.frameIntervalMs=\/Android\/i\.test\(navig
   'the main speaking orb should use a mobile-friendly frame cap');
 assert.match(speakingOrbSource, /L\.externalSync&&!this\.externalAudioActive/,
   'caption text and dust should only animate while the real audio is playing');
-assert.match(orbHtml, /thinkingFrameIntervalMs = isAndroidWebView \? \(1000 \/ 30\)/,
-  'thinking animations should be frame-capped in Android WebView');
-assert.match(orbHtml, /Math\.min\(isAndroidWebView \? 1\.35 : 2, deviceDpr\)/,
-  'thinking canvas resolution should be capped on mobile GPU');
+assert.match(speakingOrbSource, /fontBoundingBoxAscent[\s\S]*fs\*\.78/,
+  'caption glyph rasterization should fall back when Android WebView omits font metrics');
+assert.match(speakingOrbSource, /const pointStride=this\.media\?\.matches\?3:1/,
+  'reduced-motion mode should lower dust density instead of removing dust entirely');
+assert.match(fs.readFileSync(path.join(assets, 'chat-thinking-orb.html'), 'utf8'), /window\.setJarvisThinkingState/,
+  'the nine task animations should remain available in the chat thinking surface');
 
 // Exercise the actual inline WebView controller with a small DOM/timer shim.
 const inlineMatch = orbHtml.match(/<script>([\s\S]*?)<\/script>/);
@@ -117,6 +119,7 @@ const fakeRoot = {
   clientWidth: 240, style: {},
   classList: {
     toggle(name, active) { if (active) classNames.add(name); else classNames.delete(name); },
+    remove(name) { classNames.delete(name); },
     contains(name) { return classNames.has(name); },
   },
 };
@@ -173,56 +176,37 @@ assert.ok(fakeOrb.dustClearedCount > clearsBefore, 'clearing the transcript shou
 bridge.setState('speaking');
 bridge.setTaskState('COMPLETED');
 assert.equal(fakeRoot.classList.contains('thinking-active'), false,
-  'completion should stay behind an active spoken response');
+  'task progress should not add a second orb over the enlarged Home sphere');
 assert.equal(clock.timers.size, 0,
   'completion display duration must not elapse during spoken response');
 advanceClock(2000);
 bridge.setState('listening');
-assert.equal(fakeRoot.classList.contains('thinking-active'), true,
-  'queued completion should appear when speaking ends');
-assert.equal(clock.timers.size, 1, 'completion timer should begin after it becomes visible');
-advanceClock(1249);
-assert.equal(fakeRoot.classList.contains('thinking-active'), true,
-  'completion should remain visible through its display interval');
-advanceClock(1);
-assert.equal(fakeRoot.classList.contains('thinking-active'), true,
-  'the listening preset should return after the completion display interval');
-assert.equal(fakeCanvas.attributes['aria-label'], 'Jarvis dinliyor',
-  'listening should activate the listening preset above the base orb');
+assert.equal(fakeRoot.classList.contains('thinking-active'), false,
+  'the Home surface should remain a single sphere while listening');
+assert.equal(clock.timers.size, 1, 'queued completion cleanup should begin after speech ends');
+advanceClock(1250);
+assert.equal(fakeRoot.classList.contains('thinking-active'), false,
+  'completion cleanup must never reveal a second Home canvas');
 bridge.setState('idle');
-const nativeTaskStates = {
-  UNDERSTANDING: 'Jarvis düşünüyor',
-  PLANNING: 'Jarvis plan hazırlıyor',
-  OBSERVING: 'Jarvis arıyor',
-  RESOLVING_TARGET: 'Jarvis arıyor',
-  ACTING: 'Jarvis işlem yapıyor',
-  VERIFYING: 'Jarvis sonucu doğruluyor',
-  CONTINUING: 'Jarvis adımları birleştiriyor',
-  REPLANNING: 'Jarvis işlemi yeniden düzenliyor',
-  RECOVERING: 'Jarvis işlemi yeniden düzenliyor',
-  WAITING_FOR_UI: 'Jarvis bağlantı kuruyor',
-  PAUSED: 'Jarvis düşünüyor',
-  BLOCKED: 'Jarvis işlemi yeniden düzenliyor',
-  FAILED: 'Jarvis işlemi yeniden düzenliyor',
-  CANCELLED: 'Jarvis düşünüyor',
-  COMPLETED: 'Jarvis sonucu doğruluyor',
-};
-for (const [state, expectedLabel] of Object.entries(nativeTaskStates)) {
+const nativeTaskStates = [
+  'UNDERSTANDING','PLANNING','OBSERVING','RESOLVING_TARGET','ACTING','VERIFYING',
+  'CONTINUING','REPLANNING','RECOVERING','WAITING_FOR_UI','PAUSED','BLOCKED','FAILED','CANCELLED','COMPLETED'
+];
+for (const state of nativeTaskStates) {
   bridge.setTaskState(state);
-  assert.equal(fakeRoot.classList.contains('thinking-active'), true, `${state} should surface a task animation`);
-  assert.equal(fakeCanvas.attributes['aria-label'], expectedLabel, `${state} should map to its intended animation label`);
+  assert.equal(fakeRoot.classList.contains('thinking-active'), false,
+    `${state} should keep the Home screen free of a duplicate orb layer`);
   bridge.setTaskState('IDLE');
 }
-assert.equal(fakeRoot.classList.contains('thinking-active'), false, 'idle should restore the Speaking Orb');
 bridge.setThinkingAnimation('weaving');
-assert.equal(fakeRoot.classList.contains('thinking-active'), true, 'manual preset should show the animation overlay');
+assert.equal(fakeRoot.classList.contains('thinking-active'), false, 'manual animation calls must not overlay the Home sphere');
 bridge.clearThinkingAnimation();
-assert.equal(fakeRoot.classList.contains('thinking-active'), false, 'clearing manual preset should restore the base orb');
+assert.equal(fakeRoot.classList.contains('thinking-active'), false, 'clearing manual state keeps the single-sphere layout');
 const audioPlayerSource = fs.readFileSync(path.join(projectRoot, 'app', 'src', 'main', 'java', 'com', 'jarvis', 'assistant', 'audio', 'AudioPlayer.kt'), 'utf8');
 assert.match(audioPlayerSource, /playbackHeadPosition/,
   'the Android playback clock must come from AudioTrack hardware position');
 assert.match(audioPlayerSource, /allSamplesPlayed/,
   'playback must not be marked finished until buffered PCM is rendered');
 console.log('PASS local script references, hardware playback clock, and caption/dust cleanup hooks');
-console.log('PASS queued completion, planning state, and additive animation lifecycle');
+console.log('PASS single large Home orb, caption/dust bridge, and chat-based nine-animation lifecycle');
 console.log('PASS all Thinking Orb smoke checks');
