@@ -71,6 +71,10 @@ assert.match(orbHtml, /setExternalAudio:\s*\(amp, bass, high, playbackMs, playba
   'native audio clock and active state should reach the orb');
 assert.match(orbHtml, /externalSync:\s*true/,
   'live assistant captions should use the hardware playback clock');
+assert.match(orbHtml, /waitingForPlayback:\s*!orb\.externalAudioActive/,
+  'new transcript lines must not inherit a stale playback clock');
+assert.match(orbHtml, /const clockRestarted = nextActive && wasActive && nextTime \+ 0\.20 < previousTime/,
+  'a reset AudioTrack clock must re-anchor existing transcript words');
 assert.match(orbHtml, /clearCaptionDust/,
   'caption clearing should explicitly clear the particle canvas');
 assert.doesNotMatch(orbHtml, /thinkingOrbCanvas|<canvas[^>]*thinking/i,
@@ -173,6 +177,19 @@ const clearsBefore = fakeOrb.dustClearedCount;
 bridge.clearCaption();
 assert.equal(fakeOrb.line, null, 'clearing the transcript should clear its active word line');
 assert.ok(fakeOrb.dustClearedCount > clearsBefore, 'clearing the transcript should clear lingering dust');
+
+// Reproduce the bug: a reply transcript arrives while audio is inactive and the
+// last reply's AudioTrack playhead is still non-zero. Its dust must start from the
+// next reply's clock, not wait for the previous reply's timestamp.
+bridge.setExternalAudio(0, 0, 0, 6400, false);
+bridge.appendText('Yeni yanıt geliyor');
+assert.equal(fakeOrb.line.waitingForPlayback, true, 'pre-audio text should wait for this response audio');
+assert.equal(fakeOrb.line.words[0].start, 0, 'pre-audio text must not inherit the stale 6.4-second clock');
+bridge.setExternalAudio(0.4, 0.2, 0.3, 0, true);
+assert.equal(fakeOrb.line.waitingForPlayback, false, 'starting playback should release the waiting transcript');
+assert.equal(fakeOrb.line.words[0].start, 0, 'the dust timeline should rebase to the new AudioTrack start');
+
+bridge.clearCaption();
 bridge.setState('speaking');
 bridge.setTaskState('COMPLETED');
 assert.equal(fakeRoot.classList.contains('thinking-active'), false,

@@ -14,3 +14,12 @@ Android APK compilation was not run in this environment.
 - `python scripts/verify-jarvis-project.py` — all static project checks passed, including Android XML parsing, theme defaults, history/chat affordances, app ID, dust fallback, and model-voice welcome wiring.
 
 The Android APK itself was not built, per requested workflow.
+
+
+## Hotfix 1 — live speech dust timeline
+
+- Fixed a playback-clock race where assistant transcript words could be scheduled against the previous response's AudioTrack position before the next audio stream started.
+- New transcript lines wait for the next playback epoch when audio is inactive; their estimated word timeline starts at zero rather than inheriting a stale playhead.
+- When playback begins or the AudioTrack playhead resets, pending word timestamps are re-anchored to the new hardware playback clock, and caption dust resumes immediately.
+- Added a regression test that simulates a stale 6.4-second previous playback position and verifies re-anchoring to zero.
+- Package ID remains `com.jarvisai.app`; versionCode 145, versionName 1.8.9.

@@ -208,7 +208,12 @@
         if (!orb || !orb.estimate) return;
         if (!currentText || !next.startsWith(currentText)) {
           currentText = '';
-          orb.line = { toks:[], words:[], t0:0, live:true, who:'assistant', externalSync:true };
+          // Text can arrive before AudioTrack starts. Do not seed a new line with
+          // the previous response's playback position; re-anchor when this track starts.
+          orb.line = {
+            toks: [], words: [], t0: 0, live: true, who: 'assistant', externalSync: true,
+            waitingForPlayback: !orb.externalAudioActive
+          };
         }
         let delta = next.slice(currentText.length);
         if (delta && currentText && !/^\s/.test(delta)) {
@@ -217,7 +222,9 @@
           if (line && line.words.length && !/\s/.test(delta)) {
             const last = line.words[line.words.length - 1];
             last.w += delta;
-            if (line.externalSync) last.end = Math.max(last.end, (Number(orb.externalAudioTime) || 0) + 0.12);
+            if (line.externalSync && !line.waitingForPlayback && orb.externalAudioActive) {
+              last.end = Math.max(last.end, (Number(orb.externalAudioTime) || 0) + 0.12);
+            }
             line.toks[line.toks.length - 1] = last.w;
             currentText = next;
             line.groups = null;
@@ -229,7 +236,9 @@
         const tokens = delta.trim().split(/\s+/).filter(Boolean);
         if (tokens.length) {
           const line = orb.line;
-          const playbackTime = line.externalSync ? Math.max(0, Number(orb.externalAudioTime) || 0) : Math.max(0, orb.time - line.t0);
+          const playbackTime = line.externalSync
+            ? (line.waitingForPlayback ? 0 : Math.max(0, Number(orb.externalAudioTime) || 0))
+            : Math.max(0, orb.time - line.t0);
           const lastWord = line.words[line.words.length - 1];
           let t = lastWord ? lastWord.end + 0.025 : playbackTime;
           if (line.externalSync && lastWord && playbackTime > lastWord.end + 0.06) {
@@ -277,11 +286,35 @@
         },
         setExternalAudio: (amp, bass, high, playbackMs, playbackActive) => {
           if (!orb) return;
+          const previousTime = Math.max(0, Number(orb.externalAudioTime) || 0);
+          const wasActive = !!orb.externalAudioActive;
+          const nextActive = typeof playbackActive === 'boolean' ? playbackActive : true;
+          const clockMs = Number(playbackMs);
+          const hasClock = Number.isFinite(clockMs) && clockMs >= 0;
+          const nextTime = hasClock ? clockMs / 1000 : previousTime;
+          // AudioTrack resets its playhead for a fresh response. If the transcript
+          // arrived first, its words may be stamped with the last response's clock.
+          // Rebuild their timeline as soon as the new playback starts or resets.
+          const clockRestarted = nextActive && wasActive && nextTime + 0.20 < previousTime;
+          const playbackStarted = nextActive && !wasActive;
+          const line = orb.line;
+          if ((playbackStarted || clockRestarted) && line && line.externalSync && line.words && line.words.length) {
+            if (line.waitingForPlayback || clockRestarted || playbackStarted) {
+              const words = line.words.map(word => word.w);
+              const anchor = Math.max(0, nextTime - 0.04);
+              line.words = orb.estimate(words, anchor);
+              line.toks = words.slice();
+              line.groups = null;
+              line.after = false;
+              line.waitingForPlayback = false;
+            }
+          } else if (nextActive && line && line.externalSync && line.waitingForPlayback) {
+            line.waitingForPlayback = false;
+          }
           orb.level = Math.max(0, Math.min(1, Number(amp) || 0));
           orb.externalAudioLevel = orb.level;
-          orb.externalAudioActive = typeof playbackActive === 'boolean' ? playbackActive : true;
-          const clockMs = Number(playbackMs);
-          if (Number.isFinite(clockMs) && clockMs >= 0) orb.externalAudioTime = clockMs / 1000;
+          orb.externalAudioTime = nextTime;
+          orb.externalAudioActive = nextActive;
         },
         setCaption: value => { if (!orb || !orb.capEl) return; clearText(); orb.capEl.textContent = safeText(value); },
         appendText,
