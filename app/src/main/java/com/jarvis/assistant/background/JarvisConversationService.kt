@@ -2660,11 +2660,16 @@ class JarvisConversationService : Service() {
     }
 
     private fun isDirectInsultAddressedToJarvis(text: String): Boolean {
+        // NFD removes diacritics from ş/ç/ğ/ö/ü, but Turkish dotless ı is not a
+        // combining mark. Normalize it explicitly so phrases such as "gerizekalı"
+        // and "amına koyayım" are not silently missed by ASCII-oriented patterns.
         val normalized = java.text.Normalizer.normalize(text.lowercase(Locale.forLanguageTag("tr-TR")), java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
+            .replace('ı', 'i')
         val addressed = Regex("\\b(jarvis|asistan|sana|seni|sen)\\b").containsMatchIn(normalized)
-        val insult = Regex("\\b(aptal\\w*|salak\\w*|gerizekali\\w*|serefsiz\\w*|pic\\w*|orospu\\w*|sikik\\w*|siktir\\w*|mal\\w*|amk|mk)\\b")
-            .containsMatchIn(normalized)
+        val insult = Regex(
+            "\\b(aptal\\w*|salak\\w*|gerizekali\\w*|serefsiz\\w*|pic\\w*|orospu\\w*|sikik\\w*|siktir\\w*|siker\\w*|sikeyim\\w*|sikiyim\\w*|amk|mk|amina\\s+koyayim\\w*|yarrak\\w*|kahpe\\w*|pezevenk\\w*)\\b"
+        ).containsMatchIn(normalized)
         return addressed && insult
     }
 

@@ -22,4 +22,14 @@ The Android APK itself was not built, per requested workflow.
 - New transcript lines wait for the next playback epoch when audio is inactive; their estimated word timeline starts at zero rather than inheriting a stale playhead.
 - When playback begins or the AudioTrack playhead resets, pending word timestamps are re-anchored to the new hardware playback clock, and caption dust resumes immediately.
 - Added a regression test that simulates a stale 6.4-second previous playback position and verifies re-anchoring to zero.
-- Package ID remains `com.jarvisai.app`; versionCode 145, versionName 1.8.9.
+- Package ID remains `com.jarvisai.app`; this earlier hotfix used versionCode 145, versionName 1.8.9.
+
+## Hotfix 2 — caption dust exit + insult session shutdown
+
+- Kept the live caption timeline tied to actual AudioTrack playback; transcript text arriving before playback no longer forces the orb into the speaking state.
+- Added a timed outgoing-particle dissolution when a caption expires, is replaced by a new word group, or is cleared at the end of a response. Existing incoming caption particles remain on the same canvas pass.
+- Reset the DOM caption-group key when a transcript is restarted, preventing spans from an older response being reused.
+- Normalized Turkish dotless `ı` before matching direct insults aimed at Jarvis; the existing session shutdown path stops/releases `AudioRecord` and disconnects the Live WebSocket.
+- Added deterministic checks for 20 different caption-dust cases, including movement, finite coordinates, cleanup, and reduced-motion settings.
+- Bumped Android package version to versionCode 146 / versionName 1.8.10.
+- Android APK compilation and a physical-device microphone check were not possible in this environment: the Gradle distribution download is blocked by unavailable network access and no Android SDK is installed. These items must be confirmed in an Android build/device run.

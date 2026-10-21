@@ -27,8 +27,8 @@ android {
         applicationId = "com.jarvisai.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 145
-        versionName = "1.8.9"
+        versionCode = 146
+        versionName = "1.8.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEVELOPER_NAME", buildConfigString(developerName.ifBlank { "Unverified developer" }))

@@ -107,6 +107,7 @@
       this.frameIntervalMs=/Android/i.test(navigator.userAgent||'')?1000/30:1000/45;this.lastFrameAt=0;
       this.weights=names.map(n=>n===this.state?1:0); this.time=0; this.last=0; this.slow=0; this.env=0; this.onsets=[]; this.line=null;
       this.externalAudioTime=0; this.externalAudioLevel=0; this.externalAudioActive=false;
+      this.externalAudioEndedAt=null; this.externalAudioEndTime=0; this.exitDust=null;
       this.resize=()=>{const w=this.canvas.parentNode.getBoundingClientRect().width,dpr=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2),size=Math.max(1,Math.round(w*dpr));
         this.canvas.width=this.canvas.height=this.dots.width=this.dots.height=size;this.style.setProperty('--cap-size',Math.round(clamp(w*.074,22,36))+'px');
         const hr=this.getBoundingClientRect(),k=Math.min(devicePixelRatio||1,/Android/i.test(navigator.userAgent||'')?1.35:2);this.fx.width=Math.round(hr.width*k);this.fx.height=Math.round(hr.height*k);this.glyphCache=new Map();this.draw(this.time);};
@@ -204,6 +205,7 @@
       if(this.micLevel)this.setAttribute('level',this.micLevel().toFixed(3));
       this.paint(this.media.matches?0:this.time,this.weights,{env:this.media.matches?0:this.env,onsets:this.media.matches?[]:this.onsets});
       this.caption(L?lt:0,L);
+      this.drawExitDust();
       this.frame=requestAnimationFrame(this.tick);
     };
     draw(t){this.paint(t,this.weights||names.map(n=>n===this.state?1:0),{env:this.env||0,onsets:this.onsets||[]});}
@@ -217,13 +219,26 @@
 
     caption(t,L){
       const el=this.capEl;if(!el)return;
-      if(!L||!L.words.length||(L.externalSync&&!this.externalAudioActive)){if(el.childElementCount)el.textContent='';el.dataset.g='';this.flight(t,[]);return;}
+      if(!L||!L.words.length||(L.externalSync&&!this.externalAudioActive&&L.waitingForPlayback)){
+        // A caption that is replaced/hidden should leave as dust rather than disappear in one frame.
+        if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
+        el.dataset.g='';this.flight(t,[]);return;
+      }
       const W=L.words,G=L.groups??=groupsOf(W);
       let gi=-1;G.forEach((g,i)=>{if(t>=W[g[0]].start-.04)gi=i;});
-      const last=W.at(-1).end,fade=clamp(1-(t-last-1.8)/.4);
-      if(gi<0||fade<=0){if(el.childElementCount)el.textContent='';el.dataset.g='';this.flight(t,[]);return;}
+      const last=W.at(-1).end;
+      // Don't fade the final caption while real speech is still playing. After playback ends,
+      // the post-playback clock above advances its fade independently from a frozen AudioTrack.
+      const fade=L.externalSync&&this.externalAudioActive?1:clamp(1-(t-last-1.8)/.4);
+      if(gi<0||fade<=0){
+        if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
+        el.dataset.g='';this.flight(t,[]);return;
+      }
       const key=gi+':'+W.length+':'+(L.who||'');el.classList.toggle('user',L.who==='user');
-      if(el.dataset.g!==key){el.dataset.g=key;el.textContent='';
+      if(el.dataset.g!==key){
+        // Preserve the previous visible word group as outgoing particles while the next one arrives.
+        if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
+        el.dataset.g=key;
         for(const i of G[gi]){const s=document.createElement('span');s.textContent=W[i].w+' ';el.append(s);}}
       const reduce=this.media?.matches;
       [...el.children].forEach((s,k)=>{
@@ -291,7 +306,54 @@
       });
       g.globalCompositeOperation='source-over';
     }
+    dismissCaptionDust(){
+      if(!this.capEl||!this.fx||!this.fctx){this.clearCaptionDust();return;}
+      const spans=[...this.capEl.children];
+      // Idempotent clear calls shouldn't cancel a dissolution already in progress.
+      if(!spans.length){if(!this.exitDust)this.clearCaptionDust();return;}
+      const host=this.getBoundingClientRect();
+      if(!host.width||!host.height){this.clearCaptionDust();return;}
+      const rnd=n=>{const x=Math.sin(n*12.9898)*43758.5453;return x-Math.floor(x);};
+      const all=[];
+      spans.forEach((span,wi)=>{
+        const word=(span.textContent||'').trim();if(!word)return;
+        const pts=this.glyphs(word,span),sr=span.getBoundingClientRect(),ox=sr.left-host.left,oy=sr.top-host.top;
+        const stride=this.media?.matches?3:1,seed=(wi+1)*997.31;
+        for(let j=0;j<pts.length;j+=stride){
+          const a=rnd(seed+j*1.71),b=rnd(seed+j*3.13+.3),c=rnd(seed+j*5.37+.7);
+          all.push({x:ox+pts[j][0],y:oy+pts[j][1],dx:(b-.5)*(32+108*c),dy:-(8+54*a)+(c-.5)*26,
+            size:.7+a*1.25,alpha:.28+b*.72,phase:a*.12,seed:seed+j});
+        }
+      });
+      if(!all.length){this.clearCaptionDust();return;}
+      const limit=this.media?.matches?240:720;
+      const stride=Math.max(1,Math.ceil(all.length/limit));
+      this.exitDust={startedAt:performance.now(),particles:all.filter((_,i)=>i%stride===0)};
+    }
+    drawExitDust(){
+      const exit=this.exitDust,g=this.fctx,W=this.fx?.width||0,H=this.fx?.height||0;
+      if(!exit||!g||!W||!H)return;
+      const elapsed=Math.max(0,performance.now()-exit.startedAt),duration=720,p=clamp(elapsed/duration);
+      const host=this.getBoundingClientRect();
+      if(!host.width||!host.height){this.exitDust=null;return;}
+      // The caption-flight pass already clears this canvas once per frame. Do not clear it
+      // again here: a new live caption may be arriving while the previous one dissolves.
+      g.setTransform(W/host.width,0,0,W/host.width,0,0);g.globalCompositeOperation='lighter';
+      const [cr,cg,cb]=colors[SPK];
+      for(const particle of exit.particles){
+        const q=clamp((p-particle.phase*.18)/.94),e=1-Math.pow(1-q,2.2);
+        const x=particle.x+particle.dx*e+Math.sin(q*8+particle.seed)*2.6*q;
+        const y=particle.y+particle.dy*e-5*Math.sin(q*Math.PI);
+        const alpha=particle.alpha*Math.pow(1-q,1.55);if(alpha<=.008)continue;
+        const size=particle.size*(1-.45*q);
+        g.fillStyle=`rgba(${cr},${cg},${cb},${alpha.toFixed(3)})`;
+        g.fillRect(x-size/2,y-size/2,size,size);
+      }
+      g.globalCompositeOperation='source-over';
+      if(elapsed>=duration)this.exitDust=null;
+    }
     clearCaptionDust(){
+      this.exitDust=null;
       if(!this.fctx||!this.fx)return;
       this.fctx.setTransform(1,0,0,1,0,0);
       this.fctx.clearRect(0,0,this.fx.width,this.fx.height);

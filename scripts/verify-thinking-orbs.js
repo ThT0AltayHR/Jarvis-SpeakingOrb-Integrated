@@ -73,10 +73,18 @@ assert.match(orbHtml, /externalSync:\s*true/,
   'live assistant captions should use the hardware playback clock');
 assert.match(orbHtml, /waitingForPlayback:\s*!orb\.externalAudioActive/,
   'new transcript lines must not inherit a stale playback clock');
+assert.match(orbHtml, /if \(orb\.externalAudioActive\) setPrimaryState\('speaking'\)/,
+  'transcript arrival by itself must not falsely switch the orb into speaking mode');
+assert.match(orbHtml, /if \(nextActive && primaryState !== 'speaking'\) setPrimaryState\('speaking'\)/,
+  'the orb must enter speaking mode when audible AudioTrack playback starts');
 assert.match(orbHtml, /const clockRestarted = nextActive && wasActive && nextTime \+ 0\.20 < previousTime/,
   'a reset AudioTrack clock must re-anchor existing transcript words');
 assert.match(orbHtml, /clearCaptionDust/,
   'caption clearing should explicitly clear the particle canvas');
+assert.match(orbHtml, /orb\.capEl\.dataset\.g = ''/,
+  'caption clearing must reset the DOM group key before a new reply begins');
+assert.match(orbHtml, /corrected\/restarted transcript can begin without an intervening blank state/,
+  'streaming transcript resets must protect against stale caption spans');
 assert.doesNotMatch(orbHtml, /thinkingOrbCanvas|<canvas[^>]*thinking/i,
   'the Home screen should not mount a second animation canvas over/above the main sphere');
 assert.match(orbHtml, /#orbRoot \{ position:relative; width:min\(94vw, 420px\)/,
@@ -88,8 +96,18 @@ assert.match(speakingOrbSource, /const autoCount = \(\) => matchMedia\('\(pointe
   'mobile particle density should be bounded for smooth rendering');
 assert.match(speakingOrbSource, /this\.frameIntervalMs=\/Android\/i\.test\(navigator\.userAgent\|\|''\)\?1000\/30/,
   'the main speaking orb should use a mobile-friendly frame cap');
-assert.match(speakingOrbSource, /L\.externalSync&&!this\.externalAudioActive/,
-  'caption text and dust should only animate while the real audio is playing');
+assert.match(speakingOrbSource, /L\.externalSync&&!this\.externalAudioActive&&L\.waitingForPlayback/,
+  'post-playback captions may finish their timed fade but pre-audio text remains hidden');
+assert.match(speakingOrbSource, /this\.drawExitDust\(\)/,
+  'caption clearing must render a timed dust-dissolution tail');
+assert.match(speakingOrbSource, /if\(el\.childElementCount\)\{this\.dismissCaptionDust\(\);el\.textContent='';\}/,
+  'caption expiry and hidden/replaced captions must dissolve before DOM text is cleared');
+assert.match(speakingOrbSource, /Preserve the previous visible word group as outgoing particles/,
+  'the previous caption group must dissolve as the next streaming group arrives');
+assert.match(speakingOrbSource, /dismissCaptionDust\(\)[\s\S]*this\.exitDust=\{startedAt:performance\.now\(\),particles:/,
+  'visible caption glyphs must be rasterized into outgoing dust particles');
+assert.match(speakingOrbSource, /externalAudioEndedAt/,
+  'caption time must keep advancing briefly after the AudioTrack clock stops');
 assert.match(speakingOrbSource, /fontBoundingBoxAscent[\s\S]*fs\*\.78/,
   'caption glyph rasterization should fall back when Android WebView omits font metrics');
 assert.match(speakingOrbSource, /const pointStride=this\.media\?\.matches\?3:1/,
@@ -137,8 +155,10 @@ const fakeCanvas = {
 };
 const fakeOrb = {
   state: 'done', time: 0, line: null, level: 0, externalAudioTime: 0, externalAudioLevel: 0, externalAudioActive: false,
-  capEl: { textContent: '', classList: { remove() {} } },
+  capEl: { textContent: '', dataset: { g: '' }, classList: { remove() {} } },
   dustClearedCount: 0, clearCaptionDust() { this.dustClearedCount++; },
+  dustDismissCount: 0, dismissCaptionDust() { this.dustDismissCount++; },
+  externalAudioEndedAt: null, externalAudioEndTime: 0,
   estimate(tokens, start) { return tokens.map((w, i) => ({ w, start: start + i * 0.1, end: start + (i + 1) * 0.1 })); },
   pauseCount: 0, resumeCount: 0,
   pause() { this.pauseCount++; }, resume() { this.resumeCount++; },
@@ -173,21 +193,48 @@ bridge.setExternalAudio(0.55, 0.2, 0.4, 1250, true);
 bridge.appendText('Merhaba dünya');
 assert.equal(fakeOrb.line.externalSync, true, 'live captions should use hardware playback time');
 assert.equal(fakeOrb.line.words[0].start, 1.25, 'the first caption should anchor to the real audio playhead');
-const clearsBefore = fakeOrb.dustClearedCount;
+const resetDismissBefore = fakeOrb.dustDismissCount;
+bridge.appendText('Yeni yanıt');
+assert.equal(fakeOrb.capEl.dataset.g, '', 'a restarted transcript should invalidate the old DOM caption group');
+assert.ok(fakeOrb.dustDismissCount > resetDismissBefore, 'a restarted transcript should dissolve the old visible caption');
+const dismissBefore = fakeOrb.dustDismissCount;
 bridge.clearCaption();
 assert.equal(fakeOrb.line, null, 'clearing the transcript should clear its active word line');
-assert.ok(fakeOrb.dustClearedCount > clearsBefore, 'clearing the transcript should clear lingering dust');
+assert.ok(fakeOrb.dustDismissCount > dismissBefore, 'clearing the transcript should request animated dust dissolution');
+bridge.setState('thinking');
 
 // Reproduce the bug: a reply transcript arrives while audio is inactive and the
 // last reply's AudioTrack playhead is still non-zero. Its dust must start from the
 // next reply's clock, not wait for the previous reply's timestamp.
 bridge.setExternalAudio(0, 0, 0, 6400, false);
+assert.equal(fakeOrb.externalAudioTime, 1.25, 'a stop event with a zero/stale playhead must preserve the last heard clock');
+assert.ok(fakeOrb.externalAudioEndedAt !== null, 'stopping real audio should open a short post-playback fade window');
 bridge.appendText('Yeni yanıt geliyor');
 assert.equal(fakeOrb.line.waitingForPlayback, true, 'pre-audio text should wait for this response audio');
-assert.equal(fakeOrb.line.words[0].start, 0, 'pre-audio text must not inherit the stale 6.4-second clock');
+assert.equal(fakeOrb.line.words[0].start, 0, 'pre-audio text must not inherit the stale previous response clock');
+assert.equal(fakeOrb.state, 'thinking', 'transcript chunks arriving before audio must not falsely trigger speaking animation');
 bridge.setExternalAudio(0.4, 0.2, 0.3, 0, true);
+assert.equal(fakeOrb.state, 'speaking', 'actual playback start must trigger speaking animation');
 assert.equal(fakeOrb.line.waitingForPlayback, false, 'starting playback should release the waiting transcript');
 assert.equal(fakeOrb.line.words[0].start, 0, 'the dust timeline should rebase to the new AudioTrack start');
+assert.equal(fakeOrb.externalAudioEndedAt, null, 'a new response should cancel the old post-playback timer');
+
+// Validate true token streaming, including a word extended across updates, before audio starts.
+bridge.clearCaption();
+bridge.setExternalAudio(0, 0, 0, 0, false);
+bridge.setState('thinking');
+bridge.appendText('Mer');
+assert.equal(fakeOrb.line.words.length, 1, 'first partial token should create a single live word');
+bridge.appendText('Merhaba');
+assert.equal(fakeOrb.line.words.length, 1, 'word fragments should extend the same word rather than duplicate it');
+assert.equal(fakeOrb.line.words[0].w, 'Merhaba', 'the visible token should update to the latest streamed characters');
+bridge.appendText('Merhaba dünya');
+assert.equal(fakeOrb.line.words.length, 2, 'a new whitespace-delimited word should append incrementally');
+assert.equal(fakeOrb.line.words[1].w, 'dünya', 'the second streamed word should retain the exact source text');
+assert.equal(fakeOrb.state, 'thinking', 'text streaming alone must leave the orb in its actual non-speaking state');
+bridge.setExternalAudio(0.3, 0.1, 0.2, 0, true);
+assert.equal(fakeOrb.state, 'speaking', 'actual AudioTrack playback should own the speaking transition');
+assert.equal(fakeOrb.line.waitingForPlayback, false, 'live text should release from waiting once audio starts');
 
 bridge.clearCaption();
 bridge.setState('speaking');
@@ -224,6 +271,26 @@ assert.match(audioPlayerSource, /playbackHeadPosition/,
   'the Android playback clock must come from AudioTrack hardware position');
 assert.match(audioPlayerSource, /allSamplesPlayed/,
   'playback must not be marked finished until buffered PCM is rendered');
+const serviceSource = fs.readFileSync(path.join(projectRoot, 'app', 'src', 'main', 'java', 'com', 'jarvis', 'assistant', 'background', 'JarvisConversationService.kt'), 'utf8');
+assert.match(serviceSource, /replace\('ı', 'i'\)/,
+  'Turkish dotless ı must normalize so common insult phrases are recognized');
+assert.match(serviceSource, /amina\\\\s\+koyayim/,
+  'the direct-insult guard must recognize the common Turkish phrase after normalization');
+assert.match(serviceSource, /if \(isDirectInsultAddressedToJarvis\(userText\)\)\s*\{[\s\S]{0,500}?stopActiveConversation\(\)/,
+  'directly insulting Jarvis must route into the session shutdown handler');
+assert.match(serviceSource, /audioRecorder\?\.stop\(\)[\s\S]{0,120}?audioRecorder = null[\s\S]{0,500}?liveWebSocket\?\.disconnect\(\)/,
+  'session shutdown must physically stop/release AudioRecord and disconnect the Live socket');
+const normalizedInsult = value => value.toLocaleLowerCase('tr-TR').normalize('NFD').replace(/\p{M}+/gu, '').replace(/ı/g, 'i');
+const directInsultMatches = value => {
+  const normalized = normalizedInsult(value);
+  return /\b(jarvis|asistan|sana|seni|sen)\b/.test(normalized) &&
+    /\b(aptal\w*|salak\w*|gerizekali\w*|serefsiz\w*|pic\w*|orospu\w*|sikik\w*|siktir\w*|siker\w*|sikeyim\w*|sikiyim\w*|amk|mk|amina\s+koyayim\w*|yarrak\w*|kahpe\w*|pezevenk\w*)\b/.test(normalized);
+};
+for (const phrase of ['Jarvis, amına koyayım', 'Sen gerizekalısın', 'Jarvis, seni aptal']) {
+  assert.equal(directInsultMatches(phrase), true, `directed Turkish insult should shut down the mic session: ${phrase}`);
+}
+assert.equal(directInsultMatches('Jarvis, hava durumu nasıl?'), false,
+  'ordinary requests must not trigger the insult shutdown');
 console.log('PASS local script references, hardware playback clock, and caption/dust cleanup hooks');
 console.log('PASS single large Home orb, caption/dust bridge, and chat-based nine-animation lifecycle');
 console.log('PASS all Thinking Orb smoke checks');

@@ -78,9 +78,14 @@
 
       const clearText = () => {
         currentText = '';
+        if (orb && typeof orb.dismissCaptionDust === 'function') orb.dismissCaptionDust();
+        else if (orb && typeof orb.clearCaptionDust === 'function') orb.clearCaptionDust();
         if (orb) orb.line = null;
-        if (orb && orb.capEl) { orb.capEl.textContent = ''; orb.capEl.classList.remove('user'); }
-        if (orb && typeof orb.clearCaptionDust === 'function') orb.clearCaptionDust();
+        if (orb && orb.capEl) {
+          orb.capEl.textContent = '';
+          if (orb.capEl.dataset) orb.capEl.dataset.g = '';
+          orb.capEl.classList.remove('user');
+        }
       };
 
       function desiredAnimation() {
@@ -207,6 +212,13 @@
         if (!next) { clearText(); return; }
         if (!orb || !orb.estimate) return;
         if (!currentText || !next.startsWith(currentText)) {
+          // A corrected/restarted transcript can begin without an intervening blank state.
+          // Reset the DOM group key or a same-length next reply can accidentally keep old words.
+          if (currentText && orb.capEl) {
+            if (typeof orb.dismissCaptionDust === 'function') orb.dismissCaptionDust();
+            orb.capEl.textContent = '';
+            if (orb.capEl.dataset) orb.capEl.dataset.g = '';
+          }
           currentText = '';
           // Text can arrive before AudioTrack starts. Do not seed a new line with
           // the previous response's playback position; re-anchor when this track starts.
@@ -229,7 +241,7 @@
             currentText = next;
             line.groups = null;
             line.after = false;
-            setPrimaryState('speaking');
+            if (orb.externalAudioActive) setPrimaryState('speaking');
             return;
           }
         }
@@ -252,7 +264,9 @@
           line.after = false;
         }
         currentText = next;
-        setPrimaryState('speaking');
+        // Transcript can arrive before playback. Keep the real conversation state until
+        // AudioTrack confirms speech is audible; the dust line waits for its playhead too.
+        if (orb.externalAudioActive) setPrimaryState('speaking');
       };
 
       window.JarvisOrb = {
@@ -291,13 +305,21 @@
           const nextActive = typeof playbackActive === 'boolean' ? playbackActive : true;
           const clockMs = Number(playbackMs);
           const hasClock = Number.isFinite(clockMs) && clockMs >= 0;
-          const nextTime = hasClock ? clockMs / 1000 : previousTime;
+          // Some playback-stop callbacks report 0. Preserve the last heard position until
+          // a new AudioTrack starts, otherwise final captions jump backwards and vanish.
+          const nextTime = nextActive && hasClock ? clockMs / 1000 : previousTime;
           // AudioTrack resets its playhead for a fresh response. If the transcript
           // arrived first, its words may be stamped with the last response's clock.
           // Rebuild their timeline as soon as the new playback starts or resets.
           const clockRestarted = nextActive && wasActive && nextTime + 0.20 < previousTime;
           const playbackStarted = nextActive && !wasActive;
           const line = orb.line;
+          if (nextActive) {
+            orb.externalAudioEndedAt = null;
+          } else if (wasActive) {
+            orb.externalAudioEndedAt = performance.now();
+            orb.externalAudioEndTime = previousTime;
+          }
           if ((playbackStarted || clockRestarted) && line && line.externalSync && line.words && line.words.length) {
             if (line.waitingForPlayback || clockRestarted || playbackStarted) {
               const words = line.words.map(word => word.w);
@@ -315,6 +337,7 @@
           orb.externalAudioLevel = orb.level;
           orb.externalAudioTime = nextTime;
           orb.externalAudioActive = nextActive;
+          if (nextActive && primaryState !== 'speaking') setPrimaryState('speaking');
         },
         setCaption: value => { if (!orb || !orb.capEl) return; clearText(); orb.capEl.textContent = safeText(value); },
         appendText,
