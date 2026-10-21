@@ -1,4 +1,4 @@
-package com.jarvisai.app.security
+package com.jarvis.assistant.security
 
 import android.app.AlertDialog
 import android.content.Context

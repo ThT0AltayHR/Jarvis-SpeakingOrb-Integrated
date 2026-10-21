@@ -7,7 +7,7 @@ import android.text.SpannableStringBuilder
 import android.text.method.LinkMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
-import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
 import android.text.style.ClickableSpan
 import android.view.View
 import android.widget.TextView
@@ -43,7 +43,7 @@ object ChatMessageFormatter {
             if (end > start) {
                 result.setSpan(BackgroundColorSpan(Color.rgb(21, 27, 39)), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
                 result.setSpan(ForegroundColorSpan(Color.rgb(223, 231, 245)), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-                result.setSpan(StyleSpan(Typeface.MONOSPACE), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                result.setSpan(TypefaceSpan("monospace"), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
                 highlight(result, code, start)
                 result.setSpan(object : ClickableSpan() {
                         override fun onClick(widget: View) {

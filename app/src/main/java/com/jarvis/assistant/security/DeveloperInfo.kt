@@ -1,4 +1,4 @@
-package com.jarvisai.app.security
+package com.jarvis.assistant.security
 
 /**
  * Permanent Developer Identity — Tech GPTx
