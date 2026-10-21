@@ -97,52 +97,132 @@ for (let i = 0; i < 20; i++) {
 console.log('PASS 20 varied caption-dust movement, finite-coordinate, cleanup, and reduced-motion cases');
 console.log('PASS empty caption cleanup');
 
-// Exercise the actual caption() branches that otherwise used to remove text instantly.
-function captionHarness(initialText, initialKey) {
-  const { orb } = createOrb(initialText);
-  let children = initialText ? [{
-    textContent: `${initialText} `,
-    getBoundingClientRect: () => ({ left: 40, top: 70, width: initialText.length * 8, height: 22 }),
-  }] : [];
+// Exercise the actual caption() implementation under realistic incremental text updates.
+function captionHarness() {
+  const { orb } = createOrb('');
+  let children = [];
   const capEl = {
-    dataset: { g: initialKey || '' },
-    classList: { toggle() {} },
+    dataset: { g: '' },
+    classList: { toggle() {}, remove() {} },
     get children() { return children; },
     get childElementCount() { return children.length; },
     get textContent() { return children.map(child => child.textContent).join(''); },
     set textContent(value) {
       if (value === '') children = [];
-      else children = [{ textContent: String(value), getBoundingClientRect: () => ({ left: 40, top: 70, width: 80, height: 22 }) }];
+      else children = [{ textContent: String(value), style: {}, getBoundingClientRect: () => ({ left: 40, top: 70, width: 80, height: 22 }) }];
     },
     append(child) { children.push(child); },
   };
   orb.capEl = capEl;
   orb.media = { matches: false };
   orb.flight = () => {};
-  let dismissed = 0;
-  orb.dismissCaptionDust = () => { dismissed++; };
-  return { orb, capEl, dismissed: () => dismissed, childCount: () => children.length };
+  const dismissedTexts = [];
+  orb.dismissCaptionDust = () => {
+    dismissedTexts.push(capEl.textContent);
+    orb.exitDust = { startedAt: now, particles: [{ x: 1, y: 2 }] };
+  };
+  return { orb, capEl, dismissedTexts, childCount: () => children.length };
 }
+
+const words = [
+  { w: 'Jarvis.', start: 0.0, end: 0.2 },
+  { w: 'İlk', start: 0.25, end: 0.42 },
+  { w: 'cümle.', start: 0.5, end: 0.75 },
+  { w: 'İkinci', start: 0.9, end: 1.1 },
+  { w: 'cümle.', start: 1.2, end: 1.45 },
+  { w: 'Üçüncü', start: 1.55, end: 1.8 },
+  { w: 'cümle.', start: 1.9, end: 2.15 },
+  { w: 'Dördüncü', start: 2.25, end: 2.5 },
+  { w: 've', start: 2.6, end: 2.72 },
+  { w: 'son', start: 2.8, end: 2.95 },
+  { w: 'cümle.', start: 3.0, end: 3.25 },
+];
+const expectedFullText = words.map(w => w.w + ' ').join('');
+
+// Simulate the array growing over successive streaming events. None of these updates may
+// dissolve text already shown; sentence punctuation and the old eight-word grouping are irrelevant.
 {
-  const test = captionHarness('Last reply', '0:1:assistant');
-  test.orb.caption(3, { words: [{ w: 'Last.', start: 0, end: 0.1 }], who: 'assistant' });
-  assert.equal(test.dismissed(), 1, 'expired last caption must start outgoing dust');
-  assert.equal(test.childCount(), 0, 'expired caption must clear DOM after preserving its dust particles');
+  const test = captionHarness();
+  const line = { words: words.slice(0, 3), who: 'assistant', externalSync: false };
+  test.orb.caption(0.6, line);
+  assert.equal(test.capEl.textContent, 'Jarvis. İlk cümle. ', 'first streamed sentence remains visible');
+  assert.equal(test.dismissedTexts.length, 0, 'streaming the first sentence must not start dust');
+
+  line.words.push(...words.slice(3, 7));
+  test.orb.caption(2.0, line);
+  assert.equal(test.capEl.textContent, words.slice(0, 7).map(w => w.w + ' ').join(''), 'second and third sentences accumulate without removing the first');
+  assert.equal(test.dismissedTexts.length, 0, 'growing the live transcript must not dissolve earlier words');
+
+  line.words.push(...words.slice(7));
+  test.orb.caption(3.1, line);
+  assert.equal(test.capEl.textContent, expectedFullText, 'all sentences are on screen before final dissolution');
+  assert.equal(test.dismissedTexts.length, 0, 'the full answer must stay readable while the final word is spoken');
+
+  test.orb.caption(5.1, line);
+  assert.equal(test.dismissedTexts.length, 1, 'one final dust-out begins after the last word plus the hold interval');
+  assert.equal(test.dismissedTexts[0], expectedFullText, 'dust captures the complete answer, not a partial group');
+  assert.equal(test.childCount(), 0, 'DOM text clears only after all words have been captured as dust');
+  test.orb.caption(5.2, line);
+  assert.equal(test.dismissedTexts.length, 1, 'finished line must not recreate the text or dust it repeatedly');
 }
+
+// A live AudioTrack must keep the full text visible even if the caption clock has passed the
+// normal expiry threshold. Once playback actually ends, its post-playback clock permits one dust-out.
 {
-  const test = captionHarness('Old group', '0:2:assistant');
-  test.orb.caption(0.4, {
-    words: [{ w: 'One.', start: 0, end: 0.2 }, { w: 'Two.', start: 0.3, end: 0.6 }],
-    who: 'assistant',
-  });
-  assert.equal(test.dismissed(), 1, 'replacing a live word group must start outgoing dust');
-  assert.equal(test.childCount(), 1, 'new streaming group should replace the old text after it is captured as dust');
-  assert.equal(test.capEl.children[0].textContent, 'Two. ', 'new live text must still render after prior-group dissolution begins');
+  const test = captionHarness();
+  const line = { words: words.slice(), who: 'assistant', externalSync: true };
+  test.orb.externalAudioActive = true;
+  test.orb.caption(4.9, line);
+  assert.equal(test.capEl.textContent, expectedFullText, 'active audio keeps the completed text visible');
+  assert.equal(test.dismissedTexts.length, 0, 'no dust while speech is still playing');
+
+  test.orb.externalAudioActive = false;
+  test.orb.externalAudioEndedAt = now;
+  test.orb.externalAudioEndTime = 3.25;
+  test.orb.caption(5.1, line);
+  assert.equal(test.dismissedTexts.length, 1, 'the ended audio may dissolve after the full-text hold interval');
+  assert.equal(test.dismissedTexts[0], expectedFullText, 'post-playback dust includes every completed sentence');
 }
+
+// A hidden/cleared caption still dissolves safely, but a live line must never be cleared just
+// because a new streamed word changed the array length.
 {
-  const test = captionHarness('Waiting old line', '0:1:assistant');
-  test.orb.caption(0, null);
-  assert.equal(test.dismissed(), 1, 'hidden/cleared caption must start outgoing dust');
-  assert.equal(test.childCount(), 0, 'hidden caption text should be removed after dust capture');
+  const test = captionHarness();
+  const line = { words: words.slice(0, 2), who: 'assistant', externalSync: false };
+  test.orb.caption(0.4, line);
+  assert.equal(test.childCount(), 2);
+  test.orb.caption(0.45, line);
+  assert.equal(test.dismissedTexts.length, 0, 'same line refresh does not invoke outgoing dust');
+  test.orb.caption(3.0, null);
+  assert.equal(test.dismissedTexts.length, 1, 'an explicit hidden-caption transition can still start dust');
 }
-console.log('PASS actual caption expiry, word-group replacement, and hidden-caption dissolution paths');
+
+// 20 additional end-to-end caption timelines vary response length, punctuation, and grouping.
+// Each incoming word must append to the current caption with zero intermediate dust-outs.
+for (let caseIndex = 0; caseIndex < 20; caseIndex++) {
+  const test = captionHarness();
+  const count = 3 + ((caseIndex * 7) % 23);
+  const streamedWords = Array.from({ length: count }, (_, i) => ({
+    w: `C${caseIndex}W${i}${i % 4 === 3 ? '.' : (i === count - 1 ? '?' : '')}`,
+    start: i * 0.24,
+    end: i * 0.24 + 0.18,
+  }));
+  const line = { words: [], who: 'assistant', externalSync: false };
+  for (let i = 0; i < streamedWords.length; i++) {
+    line.words.push(streamedWords[i]);
+    test.orb.caption(streamedWords[i].start + 0.01, line);
+    assert.equal(test.capEl.textContent, streamedWords.slice(0, i + 1).map(w => w.w + ' ').join(''),
+      `stress case ${caseIndex + 1}, word ${i + 1}: all prior words stay accumulated`);
+    assert.equal(test.dismissedTexts.length, 0,
+      `stress case ${caseIndex + 1}, word ${i + 1}: no intermediate dust-out during streaming`);
+  }
+  test.orb.caption(streamedWords.at(-1).end + 1.81, line);
+  assert.equal(test.dismissedTexts.length, 1, `stress case ${caseIndex + 1}: exactly one final dust-out`);
+  assert.equal(test.dismissedTexts[0], streamedWords.map(w => w.w + ' ').join(''),
+    `stress case ${caseIndex + 1}: final dust contains every word in order`);
+}
+
+console.log('PASS 20 incremental caption timelines: no early dust and complete final text captured');
+console.log('PASS incremental stream preserves prior words and sentences until the complete answer is dusted');
+console.log('PASS active audio holds all completed text; post-playback clock enables final dust-out');
+console.log('PASS explicit caption hiding remains safe');

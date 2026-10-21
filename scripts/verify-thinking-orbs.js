@@ -97,13 +97,17 @@ assert.match(speakingOrbSource, /const autoCount = \(\) => matchMedia\('\(pointe
 assert.match(speakingOrbSource, /this\.frameIntervalMs=\/Android\/i\.test\(navigator\.userAgent\|\|''\)\?1000\/30/,
   'the main speaking orb should use a mobile-friendly frame cap');
 assert.match(speakingOrbSource, /L\.externalSync&&!this\.externalAudioActive&&L\.waitingForPlayback/,
-  'post-playback captions may finish their timed fade but pre-audio text remains hidden');
+  'post-playback captions use the ended-audio clock while pre-audio text remains hidden');
 assert.match(speakingOrbSource, /this\.drawExitDust\(\)/,
   'caption clearing must render a timed dust-dissolution tail');
 assert.match(speakingOrbSource, /if\(el\.childElementCount\)\{this\.dismissCaptionDust\(\);el\.textContent='';\}/,
   'caption expiry and hidden/replaced captions must dissolve before DOM text is cleared');
-assert.match(speakingOrbSource, /Preserve the previous visible word group as outgoing particles/,
-  'the previous caption group must dissolve as the next streaming group arrives');
+assert.match(speakingOrbSource, /Words appended to the SAME line object are\s+\/\/ accumulated/,
+  'incremental token updates must preserve earlier words and sentences in the same caption line');
+assert.doesNotMatch(speakingOrbSource, /const key=gi\+':'+W\.length/,
+  'caption DOM identity must not change when streamed word count increases');
+assert.match(speakingOrbSource, /if\(playbackHasEnded&&!audioStillPlaying&&t>=last\+1\.8\)/,
+  'the full caption must remain visible until the final-word hold interval, then dissolve once');
 assert.match(speakingOrbSource, /dismissCaptionDust\(\)[\s\S]*this\.exitDust=\{startedAt:performance\.now\(\),particles:/,
   'visible caption glyphs must be rasterized into outgoing dust particles');
 assert.match(speakingOrbSource, /externalAudioEndedAt/,
@@ -199,8 +203,9 @@ assert.equal(fakeOrb.capEl.dataset.g, '', 'a restarted transcript should invalid
 assert.ok(fakeOrb.dustDismissCount > resetDismissBefore, 'a restarted transcript should dissolve the old visible caption');
 const dismissBefore = fakeOrb.dustDismissCount;
 bridge.clearCaption();
-assert.equal(fakeOrb.line, null, 'clearing the transcript should clear its active word line');
-assert.ok(fakeOrb.dustDismissCount > dismissBefore, 'clearing the transcript should request animated dust dissolution');
+assert.equal(fakeOrb.line.clearRequested, true, 'clearing the transcript during live audio should defer cleanup until playback ends');
+assert.equal(fakeOrb.line.externalSync, true, 'the active spoken caption line must remain attached until audio completes');
+assert.equal(fakeOrb.dustDismissCount, dismissBefore, 'clearing text must not dust it while the final audio is still playing');
 bridge.setState('thinking');
 
 // Reproduce the bug: a reply transcript arrives while audio is inactive and the
@@ -208,7 +213,7 @@ bridge.setState('thinking');
 // next reply's clock, not wait for the previous reply's timestamp.
 bridge.setExternalAudio(0, 0, 0, 6400, false);
 assert.equal(fakeOrb.externalAudioTime, 1.25, 'a stop event with a zero/stale playhead must preserve the last heard clock');
-assert.ok(fakeOrb.externalAudioEndedAt !== null, 'stopping real audio should open a short post-playback fade window');
+assert.ok(fakeOrb.externalAudioEndedAt !== null, 'stopping real audio should open the post-playback caption clock');
 bridge.appendText('Yeni yanıt geliyor');
 assert.equal(fakeOrb.line.waitingForPlayback, true, 'pre-audio text should wait for this response audio');
 assert.equal(fakeOrb.line.words[0].start, 0, 'pre-audio text must not inherit the stale previous response clock');

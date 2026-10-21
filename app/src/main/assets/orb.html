@@ -77,6 +77,16 @@
       const reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
       const clearText = () => {
+        const line = orb && orb.line;
+        // Text-generation completion can arrive before the final PCM sample is audible. Keep
+        // the live line attached until AudioTrack ends so clearCaption cannot dust text midway
+        // through a spoken answer. The caption renderer will perform the single final dust-out.
+        if (line && line.externalSync && line.words && line.words.length &&
+            (orb.externalAudioActive || line.waitingForPlayback || orb.externalAudioEndedAt !== null)) {
+          currentText = '';
+          line.clearRequested = true;
+          return;
+        }
         currentText = '';
         if (orb && typeof orb.dismissCaptionDust === 'function') orb.dismissCaptionDust();
         else if (orb && typeof orb.clearCaptionDust === 'function') orb.clearCaptionDust();
@@ -239,7 +249,6 @@
             }
             line.toks[line.toks.length - 1] = last.w;
             currentText = next;
-            line.groups = null;
             line.after = false;
             if (orb.externalAudioActive) setPrimaryState('speaking');
             return;
@@ -260,7 +269,6 @@
           }
           line.words.push(...orb.estimate(tokens, t));
           line.toks.push(...tokens);
-          line.groups = null;
           line.after = false;
         }
         currentText = next;
@@ -326,8 +334,7 @@
               const anchor = Math.max(0, nextTime - 0.04);
               line.words = orb.estimate(words, anchor);
               line.toks = words.slice();
-              line.groups = null;
-              line.after = false;
+                line.after = false;
               line.waitingForPlayback = false;
             }
           } else if (nextActive && line && line.externalSync && line.waitingForPlayback) {

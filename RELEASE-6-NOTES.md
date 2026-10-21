@@ -33,3 +33,13 @@ The Android APK itself was not built, per requested workflow.
 - Added deterministic checks for 20 different caption-dust cases, including movement, finite coordinates, cleanup, and reduced-motion settings.
 - Bumped Android package version to versionCode 146 / versionName 1.8.10.
 - Android APK compilation and a physical-device microphone check were not possible in this environment: the Gradle distribution download is blocked by unavailable network access and no Android SDK is installed. These items must be confirmed in an Android build/device run.
+
+
+## Hotfix 3 — cumulative spoken sentences + final dust-out
+
+- Fixed the root cause of premature dust: the live-caption DOM key previously included the growing word count, so every incoming token could dismiss the words that had just appeared. A single assistant turn now keeps one stable caption line and appends words in audio-time order.
+- Previously spoken words and sentences remain visible while later sentences assemble from particles. The entire completed answer is captured into dust exactly once after the final word and hold interval; text is no longer faded to invisibility before the dust animation starts.
+- Added a monotonic post-playback caption clock, allowing final text to remain visible briefly and then dissolve even after AudioTrack stops advancing. Explicit clear requests during an active/waiting spoken response are deferred so they cannot erase the text mid-sentence.
+- Added regression coverage for 20 varied streaming timelines with 3–25 words each, sentence punctuation, active-audio holding, end-of-playback timing, complete-text particle capture, and repeated-render cleanup.
+- Bumped Android package version to versionCode 147 / versionName 1.8.11.
+- JavaScript and project static tests pass. Android APK compilation and physical-device validation could not be run here: no Android SDK is configured, and the Gradle wrapper distribution download is blocked by unavailable network access.

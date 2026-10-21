@@ -45,13 +45,7 @@
     return vs.sort((a, b) => score(b) - score(a))[0] || null;
   };
   if ('speechSynthesis' in window) speechSynthesis.getVoices();
-  // captions: phrases split at sentence ends and every ~7 words, like real subtitles
-  const groupsOf = words => {
-    const out = []; let cur = [];
-    words.forEach((w, i) => { cur.push(i); if (/[.!?]$/.test(w.w) || cur.length >= 4 && /[,;:]$/.test(w.w) || cur.length >= 8) { out.push(cur); cur = []; } });
-    if (cur.length) out.push(cur);
-    return out;
-  };
+  // Live captions accumulate word-by-word for the entire assistant turn.
 
   const VS = `attribute vec2 p;attribute vec3 d;uniform vec2 res;varying float a;varying float s;
     void main(){float size=max(d.x,2.0);float k=min(1.0,d.x*d.x/(size*size));a=d.y*k;s=d.z*k;
@@ -192,7 +186,19 @@
       const k=1-Math.exp(-dt*7);
       this.weights=this.weights.map((w,i)=>w+((names[i]===this.state?1:0)-w)*k);
       const L=this.line;let raw=0,lt=0;
-      if(L){lt=L.audio?L.audio.currentTime:(L.externalSync?Math.max(0,this.externalAudioTime):this.time-L.t0);
+      if(L){
+        // External AudioTrack stops advancing its hardware playhead when the last PCM sample
+        // has played. Continue a separate monotonic caption clock after playback so the final
+        // words can stay readable and then dissolve instead of being left forever (or cleared
+        // as soon as the playhead freezes).
+        const postPlaybackSeconds=!this.externalAudioActive&&this.externalAudioEndedAt!==null
+          ?Math.max(0,(performance.now()-this.externalAudioEndedAt)/1000):0;
+        const externalCaptionTime=this.externalAudioActive
+          ?Math.max(0,this.externalAudioTime)
+          :this.externalAudioEndedAt!==null
+            ?Math.max(0,this.externalAudioEndTime+postPlaybackSeconds)
+            :Math.max(0,this.externalAudioTime);
+        lt=L.audio?L.audio.currentTime:(L.externalSync?externalCaptionTime:this.time-L.t0);
         if(this.an&&L.audio&&!L.audio.paused){this.an.getFloatTimeDomainData(this.fbuf);let s=0;for(const v of this.fbuf)s+=v*v;raw=clamp(Math.sqrt(s/this.fbuf.length)*5);}
         else if(L.externalSync){raw=clamp(this.externalAudioLevel);}
         else raw=pulseEnv(L.words,lt);
@@ -219,38 +225,62 @@
 
     caption(t,L){
       const el=this.capEl;if(!el)return;
-      if(!L||!L.words.length||(L.externalSync&&!this.externalAudioActive&&L.waitingForPlayback)){
-        // A caption that is replaced/hidden should leave as dust rather than disappear in one frame.
+      if(!L||!L.words?.length||(L.externalSync&&!this.externalAudioActive&&L.waitingForPlayback)){
+        // Hide/reset captions only when there is no active line. Incremental transcript
+        // updates keep the same line object, so new words never make earlier words dissolve.
         if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
-        el.dataset.g='';this.flight(t,[]);return;
+        el.dataset.g='';this.captionLine=null;this.flight(t,[]);return;
       }
-      const W=L.words,G=L.groups??=groupsOf(W);
-      let gi=-1;G.forEach((g,i)=>{if(t>=W[g[0]].start-.04)gi=i;});
-      const last=W.at(-1).end;
-      // Don't fade the final caption while real speech is still playing. After playback ends,
-      // the post-playback clock above advances its fade independently from a frozen AudioTrack.
-      const fade=L.externalSync&&this.externalAudioActive?1:clamp(1-(t-last-1.8)/.4);
-      if(gi<0||fade<=0){
+      const W=L.words;
+      const last=W[W.length-1].end;
+      const audioStillPlaying=!!(L.externalSync&&this.externalAudioActive);
+      const playbackHasEnded=!L.externalSync||(!this.externalAudioActive&&this.externalAudioEndedAt!==null);
+      // Do not fade text before it turns to dust. Keep every spoken sentence readable while
+      // the answer is being spoken; once the final word has ended, dissolve the whole caption
+      // in one pass. The old group key included W.length and therefore dusted text on EACH
+      // incremental token update, before the sentence was even complete.
+      if(L.captionDustDone){this.flight(t,[]);return;}
+      if(playbackHasEnded&&!audioStillPlaying&&t>=last+1.8){
         if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
-        el.dataset.g='';this.flight(t,[]);return;
+        el.dataset.g='';
+        L.captionDustDone=true;
+        this.flight(t,[]);return;
       }
-      const key=gi+':'+W.length+':'+(L.who||'');el.classList.toggle('user',L.who==='user');
-      if(el.dataset.g!==key){
-        // Preserve the previous visible word group as outgoing particles while the next one arrives.
+      const first=W[0];
+      if(t<first.start-.04){this.flight(t,[]);return;}
+
+      el.classList.toggle('user',L.who==='user');
+      // A new utterance gets a new line object. Words appended to the SAME line object are
+      // accumulated; they are never treated as replacement captions just because its length
+      // changes while the model streams text.
+      if(this.captionLine!==L){
         if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
-        el.dataset.g=key;
-        for(const i of G[gi]){const s=document.createElement('span');s.textContent=W[i].w+' ';el.append(s);}}
+        el.dataset.g='';this.captionLine=L;
+      }
+
+      // Create spans only as their speech time approaches, in order. Keeping previous spans
+      // means earlier sentences remain visible while the next sentence is assembled from dust.
+      let due=0;
+      while(due<W.length&&W[due].start<=t+.02)due++;
+      while(el.children.length<due){
+        const i=el.children.length,s=document.createElement('span');
+        s.textContent=W[i].w+' ';el.append(s);
+      }
       const reduce=this.media?.matches;
-      [...el.children].forEach((s,k)=>{
-        const w=W[G[gi][k]],fly=L.who!=='user';
-        // AI words are built from particles first, the real text shows up as they land
+      [...el.children].forEach((s,i)=>{
+        const w=W[i];if(!w)return;
+        const text=w.w+' ';if(s.textContent!==text)s.textContent=text;
+        const fly=L.who!=='user';
+        // Assistant words assemble from particles, then remain on screen until final dust-out.
         const a=reduce?(t>=w.start?1:0):fly?ease(clamp((t-w.start-.3)/.14)):ease(clamp((t-w.start+.04)/.14));
         const on=t>=w.start-.04&&t<w.end+.12;
-        s.style.opacity=(a*fade*(on?1:.6)).toFixed(3);
+        const started=t>=w.start-.04;
+        s.style.opacity=(started?a*(on?1:.6):0).toFixed(3);
         s.style.transform=fly?'':`translateY(${((1-a)*.25).toFixed(3)}em)`;
         s.style.color=on?'var(--cap)':'';
       });
-      this.flight(t,L.who==='user'?[]:G[gi].map((i,k)=>[W[i],el.children[k]]));
+      const flightItems=L.who==='user'?[]:W.slice(0,el.children.length).map((word,i)=>[word,el.children[i]]);
+      this.flight(t,flightItems);
     }
 
     // glyph points of one word, sampled from the caption font, relative to its span box
