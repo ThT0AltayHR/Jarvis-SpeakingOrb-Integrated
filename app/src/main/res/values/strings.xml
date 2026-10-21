@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="overlay_edges">
+        <item>Sağ</item>
+        <item>Sol</item>
+        <item>Üst</item>
+        <item>Alt</item>
+    </string-array>
+    <string name="app_name">JARVIS</string>
+    <string name="jarvis_title">JARVIS</string>
+
+    <string name="state_idle">BEKLEMEDE</string>
+    <string name="state_listening">DİNLİYOR</string>
+    <string name="state_thinking">DÜŞÜNÜYOR</string>
+    <string name="state_speaking">KONUŞUYOR</string>
+
+    <string name="btn_on">AÇIK</string>
+    <string name="btn_off">KAPALI</string>
+    <string name="status_ready">HAZIR</string>
+    <string name="status_live">CANLI</string>
+    <string name="status_connecting">BAĞLANIYOR&#8230;</string>
+    <string name="status_disconnected">ÇEVRİMDIŞI</string>
+
+    <string name="settings_title">AYARLAR</string>
+    <string name="api_key_label">Gemini API anahtarı</string>
+    <string name="api_key_hint">Gemini API anahtarını buraya yapıştır</string>
+    <string name="model_label">Yapay zekâ modeli</string>
+    <string name="voice_label">Ses</string>
+    <string name="personality_label">Kişilik</string>
+    <string name="username_label">Kullanıcı adı</string>
+    <string name="username_hint">Örn. Muhammed (isteğe bağlı)</string>
+
+    <string name="chat_history_title">Sohbet geçmişi</string>
+    <string name="no_history">Henüz sohbet yok.</string>
+    <string name="clear_history">Geçmişi temizle</string>
+
+    <string name="assistant_mode">Asistan modu</string>
+    <string name="history_label">Geçmiş</string>
+    <string name="desc_mute_mic">Mikrofonu sessize al veya aç</string>
+    <string name="desc_back">Geri</string>
+    <string name="btn_save">Kaydet</string>
+    <string name="btn_paste">Panodan yapıştır</string>
+    <string name="chat_label_you">SEN</string>
+    <string name="chat_label_jarvis">JARVIS</string>
+
+    <string name="accessibility_service_desc">Jarvis için WhatsApp mesajlarını göndermeye ve izin verilen sesli işlemleri yapmaya yardımcı olur.</string>
+    <string name="memory_title">ANILAR</string>
+    <string name="memory_subtitle">Uzun süreli ve bağlamsal bilgiler</string>
+    <string name="search_memories">Anılarda ara&#8230;</string>
+    <string name="add_memory">Anı ekle</string>
+    <string name="no_memories">Henüz anı kaydedilmedi.</string>
+    <string name="category_all">Tümü</string>
+    <string name="category_personal">Kişisel</string>
+    <string name="category_preferences">Tercihler</string>
+    <string name="category_contacts">Kişiler</string>
+    <string name="category_routines">Rutinler</string>
+    <string name="category_notes">Notlar</string>
+</resources>
+

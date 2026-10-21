@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="color-scheme" content="dark light">
+  <title>Jarvis</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:transparent; }
+    body { display:flex; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent; }
+    #orbRoot { position:relative; width:min(78vw, 320px); aspect-ratio:1; max-width:100%; max-height:100%; margin:auto; }
+    speaking-orb { display:block; width:100%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
+    #thinkingOrbCanvas { position:absolute; inset:0; display:block; width:100%; height:100%; opacity:0; visibility:hidden; pointer-events:none; z-index:2; transition:opacity 180ms ease; }
+    #orbRoot.thinking-active #thinkingOrbCanvas { opacity:1; visibility:visible; }
+    #orbRoot.thinking-active speaking-orb { opacity:0; }
+    @media (prefers-reduced-motion: reduce) {
+      speaking-orb, #thinkingOrbCanvas { transition:none; }
+    }
+  </style>
+  <script src="thinking-orb-engine.js" defer></script>
+  <script src="speaking-orb.js" defer></script>
+</head>
+<body>
+  <div id="orbRoot">
+    <speaking-orb id="jarvisOrb" state="done" particles="6000" rest="listening"></speaking-orb>
+    <canvas id="thinkingOrbCanvas" aria-label="Jarvis düşünüyor" role="img"></canvas>
+  </div>
+  <script>
+    (() => {
+      'use strict';
+      const orb = document.getElementById('jarvisOrb');
+      const root = document.getElementById('orbRoot');
+      const thinkingCanvas = document.getElementById('thinkingOrbCanvas');
+      const thinkingContext = thinkingCanvas ? thinkingCanvas.getContext('2d', { alpha:true }) : null;
+      const safeText = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+      const animationNames = new Set(['working','searching','solving','listening','connecting','weaving','composing','breathing','shaping']);
+      const terminalTaskStates = new Set(['completed','failed','blocked','cancelled']);
+      const taskAnimations = {
+        understanding:'breathing',
+        planning:'composing',
+        observing:'searching',
+        resolving_target:'searching',
+        acting:'working',
+        verifying:'solving',
+        continuing:'weaving',
+        replanning:'shaping',
+        recovering:'shaping',
+        waiting_for_ui:'connecting',
+        paused:'breathing',
+        blocked:'shaping',
+        failed:'shaping',
+        cancelled:'breathing'
+      };
+      const mapState = value => ({
+        idle:'done', ready:'done', off:'done', listening:'listening',
+        thinking:'thinking', searching:'searching', speaking:'speaking', done:'done'
+      }[String(value || '').toLowerCase()] || 'listening');
+      const animationLabels = {
+        working:'Jarvis işlem yapıyor', searching:'Jarvis arıyor', solving:'Jarvis sonucu doğruluyor',
+        listening:'Jarvis dinliyor', connecting:'Jarvis bağlantı kuruyor', weaving:'Jarvis adımları birleştiriyor',
+        composing:'Jarvis plan hazırlıyor', breathing:'Jarvis düşünüyor', shaping:'Jarvis işlemi yeniden düzenliyor'
+      };
+      let currentText = '';
+      let primaryState = 'done';
+      let taskState = 'idle';
+      let taskAnimation = null;
+      let taskIsActive = false;
+      let forcedAnimation = null;
+      let themeForDots = 'dark';
+      let cssSize = 0;
+      let dpr = 1;
+      let animationFrame = 0;
+      let completionToken = 0;
+      let terminalTimer = 0;
+      let isThinkingVisible = false;
+      const reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+      const clearText = () => {
+        currentText = '';
+        if (orb) orb.line = null;
+        if (orb && orb.capEl) { orb.capEl.textContent = ''; orb.capEl.classList.remove('user'); }
+      };
+
+      function desiredAnimation() {
+        if (forcedAnimation) return forcedAnimation;
+        if (taskAnimation && taskIsActive) return taskAnimation;
+        if (primaryState === 'searching') return 'searching';
+        if (primaryState === 'thinking') return 'working';
+        return null;
+      }
+
+      function drawThinkingFrame(nowMs) {
+        if (!thinkingContext || !thinkingCanvas || !isThinkingVisible) return;
+        const engine = window.JarvisThinkingOrbEngine;
+        const state = desiredAnimation();
+        if (!engine || !state) return;
+        if (!cssSize || !dpr) resizeThinkingCanvas();
+        thinkingContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+        thinkingContext.clearRect(0, 0, cssSize, cssSize);
+        engine.draw(thinkingContext, state, cssSize, (Number(nowMs) || performance.now()) / 1000, themeForDots !== 'light', 1);
+      }
+
+      function stopThinkingLoop() {
+        if (animationFrame) cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+      }
+
+      function thinkingLoop(nowMs) {
+        animationFrame = 0;
+        if (!isThinkingVisible || document.visibilityState === 'hidden') return;
+        drawThinkingFrame(nowMs);
+        if (!reducedMotion) animationFrame = requestAnimationFrame(thinkingLoop);
+      }
+
+      function startThinkingLoop() {
+        stopThinkingLoop();
+        if (!isThinkingVisible) return;
+        drawThinkingFrame(performance.now());
+        if (!reducedMotion && document.visibilityState !== 'hidden') animationFrame = requestAnimationFrame(thinkingLoop);
+      }
+
+      function resizeThinkingCanvas() {
+        if (!thinkingCanvas || !root) return;
+        const nextSize = Math.max(1, Math.floor(root.clientWidth || 240));
+        const nextDpr = Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
+        if (nextSize === cssSize && nextDpr === dpr) return;
+        cssSize = nextSize;
+        dpr = nextDpr;
+        thinkingCanvas.width = Math.round(cssSize * dpr);
+        thinkingCanvas.height = Math.round(cssSize * dpr);
+        if (isThinkingVisible) drawThinkingFrame(performance.now());
+      }
+
+      function refreshThinkingVisibility() {
+        const taskCanShow = taskIsActive && primaryState !== 'speaking';
+        const shouldShow = !!(forcedAnimation || primaryState === 'thinking' || primaryState === 'searching' || taskCanShow);
+        const wasShowing = isThinkingVisible;
+        const state = desiredAnimation();
+        root.classList.toggle('thinking-active', shouldShow);
+        isThinkingVisible = shouldShow;
+        if (thinkingCanvas) thinkingCanvas.setAttribute('aria-label', animationLabels[state] || 'Jarvis düşünüyor');
+        if (shouldShow) {
+          if (!wasShowing && orb && typeof orb.pause === 'function') orb.pause();
+          resizeThinkingCanvas();
+          if (!wasShowing || (!animationFrame && document.visibilityState !== 'hidden' && !reducedMotion)) startThinkingLoop();
+          else drawThinkingFrame(performance.now());
+        } else {
+          stopThinkingLoop();
+          if (wasShowing && orb && typeof orb.resume === 'function') orb.resume();
+          if (thinkingContext && thinkingCanvas) {
+            thinkingContext.setTransform(1, 0, 0, 1, 0, 0);
+            thinkingContext.clearRect(0, 0, thinkingCanvas.width, thinkingCanvas.height);
+          }
+        }
+      }
+
+      function clearTerminalTimer() {
+        if (terminalTimer) window.clearTimeout(terminalTimer);
+        terminalTimer = 0;
+      }
+
+      function scheduleTerminalClear(token, state) {
+        clearTerminalTimer();
+        // Do not consume the completion/error display time while the speaking orb is foregrounded.
+        if (primaryState === 'speaking') return;
+        terminalTimer = window.setTimeout(() => {
+          terminalTimer = 0;
+          if (completionToken !== token || primaryState === 'speaking') return;
+          taskAnimation = null;
+          taskIsActive = false;
+          taskState = 'idle';
+          refreshThinkingVisibility();
+        }, state === 'completed' ? 1250 : 700);
+      }
+
+      function setPrimaryState(value) {
+        const wasSpeaking = primaryState === 'speaking';
+        primaryState = mapState(value);
+        forcedAnimation = null;
+        if (orb) orb.state = primaryState;
+        if (wasSpeaking && primaryState !== 'speaking' && terminalTaskStates.has(taskState)) {
+          scheduleTerminalClear(completionToken, taskState);
+        }
+        refreshThinkingVisibility();
+      }
+
+      function setTaskState(value) {
+        taskState = String(value || 'idle').toLowerCase().replace(/[\s-]+/g, '_');
+        completionToken++;
+        const token = completionToken;
+        clearTerminalTimer();
+        if (taskState === 'idle') {
+          taskIsActive = false;
+          taskAnimation = null;
+          refreshThinkingVisibility();
+          return;
+        }
+        if (terminalTaskStates.has(taskState)) {
+          taskIsActive = true;
+          taskAnimation = taskState === 'completed' ? 'solving' : (taskAnimations[taskState] || 'shaping');
+          refreshThinkingVisibility();
+          scheduleTerminalClear(token, taskState);
+          return;
+        }
+        taskIsActive = true;
+        taskAnimation = taskAnimations[taskState] || 'working';
+        refreshThinkingVisibility();
+      }
+
+      const appendText = value => {
+        const next = safeText(value);
+        if (!next) { clearText(); return; }
+        if (!orb || !orb.estimate) return;
+        if (!currentText || !next.startsWith(currentText)) {
+          currentText = '';
+          orb.line = { toks:[], words:[], t0:orb.time, live:true, who:'assistant' };
+        }
+        let delta = next.slice(currentText.length);
+        if (delta && currentText && !/^\s/.test(delta)) {
+          // Streaming updates can finish the currently forming word without adding another one.
+          const line = orb.line;
+          if (line && line.words.length && !/\s/.test(delta)) {
+            const last = line.words[line.words.length - 1];
+            last.w += delta;
+            line.toks[line.toks.length - 1] = last.w;
+            currentText = next;
+            line.groups = null;
+            line.after = false;
+            setPrimaryState('speaking');
+            return;
+          }
+        }
+        const tokens = delta.trim().split(/\s+/).filter(Boolean);
+        if (tokens.length) {
+          const line = orb.line;
+          let t = line.words.length ? line.words[line.words.length - 1].end + 0.025 : Math.max(0, orb.time - line.t0);
+          line.words.push(...orb.estimate(tokens, t));
+          line.toks.push(...tokens);
+          line.groups = null;
+          line.after = false;
+        }
+        currentText = next;
+        setPrimaryState('speaking');
+      };
+
+      window.JarvisOrb = {
+        setState: setPrimaryState,
+        setTaskState,
+        // Optional direct API: choose any of the nine bundled animation presets.
+        setThinkingAnimation: value => {
+          const key = String(value || '').toLowerCase();
+          forcedAnimation = animationNames.has(key) ? key : null;
+          refreshThinkingVisibility();
+        },
+        clearThinkingAnimation: () => { forcedAnimation = null; refreshThinkingVisibility(); },
+        setTheme: value => {
+          const key = String(value || 'light').toLowerCase();
+          const filters = { light:'saturate(.9)', dark:'hue-rotate(145deg) saturate(.95)', red:'hue-rotate(-36deg) saturate(1.45)', sunset:'hue-rotate(58deg) saturate(1.1)' };
+          themeForDots = key === 'light' ? 'light' : 'dark';
+          root.style.filter = filters[key] || 'none';
+          if (isThinkingVisible) drawThinkingFrame(performance.now());
+        },
+        setBackground: value => {
+          const hex = String(value || '').match(/^#?([0-9a-f]{6})$/i);
+          if (!hex) return;
+          const n = parseInt(hex[1], 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+          const max = Math.max(r,g,b), min = Math.min(r,g,b), d = max-min;
+          let h = 0;
+          if (d) h = max===r ? ((g-b)/d)%6 : max===g ? (b-r)/d+2 : (r-g)/d+4;
+          h = (h*60+360)%360;
+          themeForDots = 'dark';
+          root.style.filter = `hue-rotate(${Math.round((h-35+360)%360)}deg) saturate(1.15)`;
+          if (isThinkingVisible) drawThinkingFrame(performance.now());
+        },
+        setExternalAudio: (amp, bass, high) => { if (orb) orb.level = Math.max(0, Math.min(1, Number(amp) || 0)); },
+        setCaption: value => { if (!orb || !orb.capEl) return; clearText(); orb.capEl.textContent = safeText(value); },
+        appendText,
+        clearCaption: clearText
+      };
+
+      document.addEventListener('visibilitychange', () => {
+        if (!isThinkingVisible) return;
+        if (document.visibilityState === 'hidden') stopThinkingLoop();
+        else startThinkingLoop();
+      });
+      if (typeof ResizeObserver !== 'undefined' && root) new ResizeObserver(resizeThinkingCanvas).observe(root);
+      else window.addEventListener('resize', resizeThinkingCanvas, { passive:true });
+      resizeThinkingCanvas();
+    })();
+  </script>
+</body>
+</html>
