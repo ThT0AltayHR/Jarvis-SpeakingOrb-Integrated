@@ -3,21 +3,18 @@ package com.jarvis.assistant.data.model
 import com.google.gson.annotations.SerializedName
 
 object GeminiConstants {
+    // Legacy identifiers are retained only so previously saved settings can be migrated safely.
     const val MODEL_3_1_FLASH = "models/gemini-3.1-flash-live-preview"
     const val MODEL_3_8_LIVE = "models/gemini-3.8-live"
-    const val MODEL_3_1_FLASH_AGENT = "models/gemini-3.1-flash-agent"
-    const val MODEL_2_0_FLASH = MODEL_3_1_FLASH
-    const val MODEL_2_0_FLASH_REALTIME = MODEL_3_1_FLASH
+    const val MODEL_2_0_FLASH = MODEL_3_8_LIVE
+    const val MODEL_2_0_FLASH_REALTIME = MODEL_3_8_LIVE
 
     const val RELEASE_API_KEY = ""
 
-    const val DEFAULT_MODEL = MODEL_3_1_FLASH
+    const val DEFAULT_MODEL = MODEL_3_8_LIVE
 
-    val SUPPORTED_MODELS = listOf(
-        MODEL_3_1_FLASH,
-        MODEL_3_8_LIVE,
-        MODEL_3_1_FLASH_AGENT
-    )
+    // Only model IDs verified against the current Live API are user-selectable.
+    val SUPPORTED_MODELS = listOf(MODEL_3_8_LIVE)
 
     const val DEFAULT_LANGUAGE = "Turkish"
 

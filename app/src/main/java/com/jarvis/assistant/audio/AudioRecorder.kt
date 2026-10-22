@@ -32,9 +32,13 @@ class AudioRecorder(
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var automaticGainControl: AutomaticGainControl? = null
+    @Volatile private var echoCancellationActive = false
     private var recordingJob: Job? = null
     private val isRecording = AtomicBoolean(false)
     val isMuted = AtomicBoolean(false)
+
+    /** True only when Android confirms that the current capture session has active AEC. */
+    fun hasActiveEchoCancellation(): Boolean = echoCancellationActive
 
     @SuppressLint("MissingPermission")
     fun start(scope: CoroutineScope): Boolean {
@@ -63,40 +67,7 @@ class AudioRecorder(
                 return false
             }
 
-            val sessionId = record.audioSessionId
-            if (AcousticEchoCanceler.isAvailable()) {
-                try {
-                    echoCanceler = AcousticEchoCanceler.create(sessionId)?.apply {
-                        enabled = true
-                    }
-                    Log.i(TAG, "Hardware AcousticEchoCanceler enabled on session $sessionId")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to enable AcousticEchoCanceler: ${e.message}")
-                }
-            }
-
-            if (NoiseSuppressor.isAvailable()) {
-                try {
-                    noiseSuppressor = NoiseSuppressor.create(sessionId)?.apply {
-                        enabled = true
-                    }
-                    Log.i(TAG, "Hardware NoiseSuppressor enabled on session $sessionId")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to enable NoiseSuppressor: ${e.message}")
-                }
-            }
-
-            if (AutomaticGainControl.isAvailable()) {
-                try {
-                    automaticGainControl = AutomaticGainControl.create(sessionId)?.apply {
-                        enabled = true
-                    }
-                    Log.i(TAG, "Hardware AutomaticGainControl enabled on session $sessionId")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to enable AutomaticGainControl: ${e.message}")
-                }
-            }
-
+            configureAudioEffects(record.audioSessionId)
             record.startRecording()
             audioRecord = record
             isRecording.set(true)
@@ -151,6 +122,7 @@ class AudioRecorder(
                                 bufferSize
                             )
                             if (newRecord.state == AudioRecord.STATE_INITIALIZED) {
+                                configureAudioEffects(newRecord.audioSessionId)
                                 newRecord.startRecording()
                                 currentRecord = newRecord
                                 audioRecord = newRecord
@@ -178,17 +150,7 @@ class AudioRecorder(
         recordingJob?.cancel()
         recordingJob = null
 
-        try {
-            echoCanceler?.release()
-            noiseSuppressor?.release()
-            automaticGainControl?.release()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error releasing audio effects: ${e.message}")
-        } finally {
-            echoCanceler = null
-            noiseSuppressor = null
-            automaticGainControl = null
-        }
+        releaseAudioEffects()
 
         try {
             audioRecord?.let {
@@ -201,6 +163,52 @@ class AudioRecorder(
             Log.e(TAG, "Error stopping AudioRecord: ${e.message}")
         } finally {
             audioRecord = null
+        }
+    }
+
+    private fun configureAudioEffects(sessionId: Int) {
+        releaseAudioEffects()
+        if (AcousticEchoCanceler.isAvailable()) {
+            try {
+                echoCanceler = AcousticEchoCanceler.create(sessionId)?.apply { enabled = true }
+                echoCancellationActive = echoCanceler?.enabled == true
+                Log.i(TAG, "Hardware AcousticEchoCanceler active=$echoCancellationActive on session $sessionId")
+            } catch (e: Exception) {
+                echoCancellationActive = false
+                Log.w(TAG, "Failed to enable AcousticEchoCanceler: ${e.message}")
+            }
+        } else {
+            echoCancellationActive = false
+        }
+
+        if (NoiseSuppressor.isAvailable()) {
+            try {
+                noiseSuppressor = NoiseSuppressor.create(sessionId)?.apply { enabled = true }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to enable NoiseSuppressor: ${e.message}")
+            }
+        }
+        if (AutomaticGainControl.isAvailable()) {
+            try {
+                automaticGainControl = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to enable AutomaticGainControl: ${e.message}")
+            }
+        }
+    }
+
+    private fun releaseAudioEffects() {
+        try {
+            echoCanceler?.release()
+            noiseSuppressor?.release()
+            automaticGainControl?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing audio effects: ${e.message}")
+        } finally {
+            echoCanceler = null
+            noiseSuppressor = null
+            automaticGainControl = null
+            echoCancellationActive = false
         }
     }
 

@@ -16,7 +16,8 @@ import com.jarvis.assistant.data.model.ChatTurn
 import com.jarvis.assistant.databinding.ItemNairaChatMessageBinding
 
 class JarvisChatAdapter(
-    private val onEditUserMessage: ((String) -> Unit)? = null
+    private val onEditUserMessage: ((String) -> Unit)? = null,
+    private val onPlayAssistantResponse: ((String) -> Unit)? = null
 ) : ListAdapter<ChatTurn, JarvisChatAdapter.MessageViewHolder>(DiffCallback) {
 
     companion object DiffCallback : DiffUtil.ItemCallback<ChatTurn>() {
@@ -93,8 +94,13 @@ class JarvisChatAdapter(
                     copyToClipboard(context, "Jarvis response", turn.jarvisResponse)
                 }
 
+                binding.btnAssistantPlay.contentDescription = "Yanıtı seslendir"
+                binding.btnAssistantPlay.isClickable = true
+                binding.btnAssistantPlay.isFocusable = true
                 binding.btnAssistantPlay.setOnClickListener {
-                    Toast.makeText(context, "Playing response...", Toast.LENGTH_SHORT).show()
+                    val action = onPlayAssistantResponse
+                    if (action != null) action(turn.jarvisResponse)
+                    else Toast.makeText(context, "Seslendirme bu ekranda kullanılamıyor", Toast.LENGTH_SHORT).show()
                 }
             } else {
                 binding.layoutAssistantContainer.visibility = View.GONE

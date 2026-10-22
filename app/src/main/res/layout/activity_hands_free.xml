@@ -564,7 +564,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="The app comes pre-configured with Google's gemini-3.8-live model and embedded release API key. Ultra-low latency voice streaming with immediate responses."
+                    android:text="Gemini 3.8 Live is preselected. Add your own Gemini API key in API settings to start live voice streaming; this build does not contain an embedded key."
                     android:textColor="?attr/themeTextMuted"
                     android:textSize="12.5sp"
                     android:lineSpacingExtra="2dp" />

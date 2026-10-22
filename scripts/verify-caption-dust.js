@@ -175,6 +175,9 @@ const expectedFullText = words.map(w => w.w + ' ').join('');
   test.orb.caption(4.9, line);
   assert.equal(test.capEl.textContent, expectedFullText, 'active audio keeps the completed text visible');
   assert.equal(test.dismissedTexts.length, 0, 'no dust while speech is still playing');
+  test.orb.caption(9.5, line);
+  assert.equal(test.capEl.textContent, expectedFullText, 'even a long gap in caption updates cannot dissolve text before audio ends');
+  assert.equal(test.dismissedTexts.length, 0, 'network or transcript gaps during active audio never trigger final dust');
 
   test.orb.externalAudioActive = false;
   test.orb.externalAudioEndedAt = now;
@@ -199,7 +202,7 @@ const expectedFullText = words.map(w => w.w + ' ').join('');
 
 // 20 additional end-to-end caption timelines vary response length, punctuation, and grouping.
 // Each incoming word must append to the current caption with zero intermediate dust-outs.
-for (let caseIndex = 0; caseIndex < 20; caseIndex++) {
+for (let caseIndex = 0; caseIndex < 100; caseIndex++) {
   const test = captionHarness();
   const count = 3 + ((caseIndex * 7) % 23);
   const streamedWords = Array.from({ length: count }, (_, i) => ({
@@ -222,7 +225,7 @@ for (let caseIndex = 0; caseIndex < 20; caseIndex++) {
     `stress case ${caseIndex + 1}: final dust contains every word in order`);
 }
 
-console.log('PASS 20 incremental caption timelines: no early dust and complete final text captured');
+console.log('PASS 100 incremental caption timelines: no early dust and complete final text captured');
 console.log('PASS incremental stream preserves prior words and sentences until the complete answer is dusted');
 console.log('PASS active audio holds all completed text; post-playback clock enables final dust-out');
 console.log('PASS explicit caption hiding remains safe');

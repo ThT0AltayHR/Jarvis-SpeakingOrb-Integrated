@@ -3,6 +3,8 @@ package com.jarvis.assistant.ui.chat
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.media.AudioAttributes
+import android.speech.tts.TextToSpeech
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -26,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
+import java.util.Locale
 
 class ChatFragment : Fragment() {
 
@@ -40,6 +43,8 @@ class ChatFragment : Fragment() {
     private var thinkingLabel: String = "Jarvis çalışıyor"
     private var awaitingTurnText: String? = null
     private var widgetPageReady = false
+    private var responseTts: TextToSpeech? = null
+    @Volatile private var responseTtsReady = false
 
     private val attachmentPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) handleSelectedUris(uris)
@@ -50,7 +55,8 @@ class ChatFragment : Fragment() {
             binding.etMessageInput.setText(text)
             binding.etMessageInput.setSelection(text.length)
             binding.etMessageInput.requestFocus()
-        }
+        },
+        onPlayAssistantResponse = { text -> speakAssistantResponse(text) }
     )
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -61,6 +67,7 @@ class ChatFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         com.jarvis.assistant.util.ThemeManager.applyDynamicBackground(binding.root)
+        initializeResponseSpeech()
 
         binding.rvChatMessages.layoutManager = LinearLayoutManager(requireContext()).apply { stackFromEnd = true }
         binding.rvChatMessages.adapter = chatAdapter
@@ -90,15 +97,72 @@ class ChatFragment : Fragment() {
         binding.btnChatMenu.setOnClickListener {
             ChatHistoryBottomSheet.newInstance().show(parentFragmentManager, ChatHistoryBottomSheet.TAG)
         }
-        binding.chipPersona.setOnClickListener {
-            Toast.makeText(requireContext(), "Jarvis modu etkin", Toast.LENGTH_SHORT).show()
-        }
-        binding.chipMode.setOnClickListener {
-            Toast.makeText(requireContext(), "Metin, kod ve dosya analizi", Toast.LENGTH_SHORT).show()
-        }
+        // These are status labels, not fake controls. Keep them visibly static.
+        binding.chipPersona.isClickable = false
+        binding.chipPersona.isFocusable = false
+        binding.chipMode.isClickable = false
+        binding.chipMode.isFocusable = false
         binding.btnAttach.setOnClickListener { attachmentPicker.launch(arrayOf("*/*")) }
 
         observeChatTurns()
+    }
+
+    private fun initializeResponseSpeech() {
+        responseTtsReady = false
+        responseTts?.shutdown()
+        responseTts = TextToSpeech(requireContext().applicationContext) { status ->
+            val engine = responseTts ?: return@TextToSpeech
+            if (status != TextToSpeech.SUCCESS) {
+                responseTtsReady = false
+                return@TextToSpeech
+            }
+            try {
+                engine.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                val language = engine.setLanguage(Locale.forLanguageTag("tr-TR"))
+                responseTtsReady = language != TextToSpeech.LANG_MISSING_DATA &&
+                    language != TextToSpeech.LANG_NOT_SUPPORTED
+            } catch (_: Exception) {
+                responseTtsReady = false
+            }
+        }
+    }
+
+    private fun speakAssistantResponse(rawText: String) {
+        val engine = responseTts
+        if (engine == null || !responseTtsReady) {
+            Toast.makeText(requireContext(), "Ses motoru henüz hazır değil veya Türkçe desteklenmiyor", Toast.LENGTH_LONG).show()
+            return
+        }
+        // Speak prose, not code samples or Markdown punctuation.
+        val spokenText = rawText
+            .replace(Regex("```[\\s\\S]*?```"), " Kod bloğu atlandı. ")
+            .replace(Regex("\\[([^\\]]+)]\\(https?://[^\\s)]+\\)"), "$1")
+            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
+            .replace(Regex("(?m)^\\s*[-*+]\\s+"), "")
+            .replace(Regex("(?m)^\\s*\\d+[.)]\\s+"), "")
+            .replace(Regex("[*_`>#]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (spokenText.isBlank()) {
+            Toast.makeText(requireContext(), "Seslendirilecek metin yok", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            engine.stop()
+            val status = engine.speak(spokenText, TextToSpeech.QUEUE_FLUSH, Bundle(), "jarvis-chat-replay")
+            if (status == TextToSpeech.ERROR) {
+                Toast.makeText(requireContext(), "Yanıt seslendirilemedi", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(requireContext(), "Yanıt seslendiriliyor", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(requireContext(), "Seslendirme başlatılamadı: ${e.message ?: "bilinmeyen hata"}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun handleSelectedUris(uris: List<android.net.Uri>) {
@@ -339,6 +403,9 @@ class ChatFragment : Fragment() {
         responseTimeoutJob = null
         try { _binding?.webThinkingWidget?.stopLoading(); _binding?.webThinkingWidget?.loadUrl("about:blank") } catch (_: Exception) { }
         widgetPageReady = false
+        try { responseTts?.stop(); responseTts?.shutdown() } catch (_: Exception) { }
+        responseTts = null
+        responseTtsReady = false
         super.onDestroyView()
         _binding = null
     }

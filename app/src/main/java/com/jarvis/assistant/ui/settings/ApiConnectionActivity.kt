@@ -50,18 +50,14 @@ class ApiConnectionActivity : AppCompatActivity() {
 
     private fun loadCurrentPreferences() {
         binding.etApiKey.setText(preferences.apiKey)
-        binding.etCustomEndpoint.setText(preferences.customEndpoint)
 
         if (!preferences.canStoreApiKeySecurely) {
             binding.tvLiveStatus.text = "SECURE STORAGE UNAVAILABLE • API KEY DISABLED"
             binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
         }
 
-        when (preferences.aiModel) {
-            GeminiConstants.MODEL_3_8_LIVE -> binding.rbModelFlash20.isChecked = true
-            GeminiConstants.MODEL_3_1_FLASH_AGENT -> binding.rbModelFlash15.isChecked = true
-            else -> binding.rbModelFlashThinking.isChecked = true
-        }
+        // AppPreferences migrates unsupported or retired model IDs to the stable default.
+        binding.rbModelFlashThinking.isChecked = true
 
         if (!preferences.canStoreApiKeySecurely) {
             // Keep the secure-storage warning set above.
@@ -73,9 +69,7 @@ class ApiConnectionActivity : AppCompatActivity() {
             binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EAB308"))
         }
 
-        if (preferences.customEndpoint.isNotBlank()) {
-            binding.tvEndpointSummary.text = "Active Endpoint: ${preferences.customEndpoint}"
-        }
+        binding.tvEndpointSummary.text = "Official Gemini Live API • WebSocket transport"
     }
 
     private fun setupListeners() {
@@ -111,7 +105,7 @@ class ApiConnectionActivity : AppCompatActivity() {
 
     private fun testConnection(apiKey: String) {
         binding.btnTestConnection.isEnabled = false
-        binding.tvPingResult.text = "Testing ping..."
+        binding.tvPingResult.text = "Checking API key and network..."
         binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#3B82F6"))
 
         lifecycleScope.launch {
@@ -136,14 +130,14 @@ class ApiConnectionActivity : AppCompatActivity() {
             binding.btnTestConnection.isEnabled = true
             if (result.first) {
                 val ping = result.second
-                binding.tvPingResult.text = "Ping: ${ping}ms • Valid"
-                binding.tvLiveStatus.text = "CONNECTED • HANDSHAKE OK"
+                binding.tvPingResult.text = "HTTP: ${ping}ms • Key accepted"
+                binding.tvLiveStatus.text = "API KEY CHECK PASSED • HTTP REACHABLE"
                 binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#22C55E"))
-                Snackbar.make(binding.root, "Connection verified! Ping: ${ping}ms", Snackbar.LENGTH_LONG).show()
+                Snackbar.make(binding.root, "API key accepted by Google's model-list endpoint (${ping}ms). Live WebSocket startup is checked when Jarvis connects.", Snackbar.LENGTH_LONG).show()
             } else {
                 val code = result.second
                 binding.tvPingResult.text = if (code == -1) "Network Timeout" else "HTTP $code Error"
-                binding.tvLiveStatus.text = "FAILED • INVALID KEY OR NETWORK"
+                binding.tvLiveStatus.text = "API KEY CHECK FAILED • KEY / NETWORK"
                 binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
                 Snackbar.make(binding.root, "Connection failed. Please verify API key.", Snackbar.LENGTH_LONG).show()
             }
@@ -152,13 +146,7 @@ class ApiConnectionActivity : AppCompatActivity() {
 
     private fun saveAndApply() {
         val key = binding.etApiKey.text?.toString()?.trim() ?: ""
-        val customEp = binding.etCustomEndpoint.text?.toString()?.trim() ?: ""
-
-        val selectedModel = when (binding.rgModelGroup.checkedRadioButtonId) {
-            binding.rbModelFlash20.id -> GeminiConstants.MODEL_3_8_LIVE
-            binding.rbModelFlash15.id -> GeminiConstants.MODEL_3_1_FLASH_AGENT
-            else -> GeminiConstants.MODEL_3_1_FLASH
-        }
+        val selectedModel = GeminiConstants.DEFAULT_MODEL
 
         try {
             preferences.apiKey = key
@@ -167,7 +155,9 @@ class ApiConnectionActivity : AppCompatActivity() {
             return
         }
         preferences.aiModel = selectedModel
-        preferences.customEndpoint = customEp
+        // The previous UI advertised a custom gateway that the socket never used.
+        // Clear its stale value so the screen cannot imply an inactive endpoint is active.
+        preferences.customEndpoint = ""
         com.jarvis.assistant.background.JarvisConversationService.clearLiveError()
         com.jarvis.assistant.background.JarvisConversationService.restartSession()
 

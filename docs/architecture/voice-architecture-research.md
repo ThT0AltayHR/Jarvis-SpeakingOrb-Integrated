@@ -2,7 +2,7 @@
 
 ## Recommendation
 
-Use `gemini-3.1-flash-live-preview` for the active conversation. Google describes it as an audio-to-audio model optimized for low-latency dialogue and voice-first applications. Its default minimal thinking is the latency-oriented configuration. The app now makes it the default and reduces microphone chunks from 40 ms to 20 ms.
+Use `gemini-3.8-live` for the active conversation. It is the current stable Live API model recommended for most low-latency voice agents. The previous `gemini-3.1-flash-live-preview` model is a preview and Google recommends migrating to `gemini-3.8-live`; it is scheduled to shut down on November 17, 2026. The app therefore exposes only the verified stable model instead of offering legacy or placeholder IDs that fail setup. Microphone chunks remain 20 ms.
 
 The Live API must not be used as a 24-hour wake-word listener. It would transmit ambient speech, cost tokens, and still has connection/session limits. Instead, Jarvis now uses an Android foreground microphone service in standby and opens Gemini only after its wake phrase detector finds `Jarvis`, `Hey Jarvis`, or `Jarvis wake up`.
 
@@ -26,7 +26,7 @@ The platform recognizer is configured to prefer on-device recognition. Devices w
 
 ## Sources
 
-1. Google AI for Developers, [Gemini 3.1 Flash Live Preview](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview) — current model purpose, migration notes, and model identifier.
+1. Google AI for Developers, [Live API capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities) — stable `gemini-3.8-live` is the default for most low-latency voice experiences; [Gemini API deprecations](https://ai.google.dev/gemini-api/docs/deprecations/) — legacy `gemini-3.1-flash-live-preview` replacement and retirement schedule.
 2. Google AI for Developers, [Live API capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities) — native audio, transcription, and thinking-level behavior.
 3. Google AI for Developers, [Live API session management](https://ai.google.dev/gemini-api/docs/live-api/session-management) — connection limits, compression, and resumption.
 4. Android Developers, [Foreground service types](https://developer.android.com/about/versions/14/changes/fgs-types-required) — microphone foreground-service declaration and permission requirements.

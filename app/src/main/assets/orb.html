@@ -11,7 +11,7 @@
     html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:transparent; }
     body { display:flex; align-items:center; justify-content:center; -webkit-tap-highlight-color:transparent; }
     #orbRoot { position:relative; width:min(94vw, 420px); height:100%; aspect-ratio:auto; max-width:100%; max-height:100%; margin:auto; }
-    speaking-orb { display:block; position:absolute; left:0; bottom:0; width:100%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: system-ui, -apple-system, "Segoe UI", sans-serif; opacity:1; transition:opacity 180ms ease; }
+    speaking-orb { display:block; position:absolute; left:0; bottom:0; width:100%; --cap:#f7f3ff; --cap-dim:rgba(255,255,255,.48); --cap-font: "Noto Serif", "Iowan Old Style", Georgia, serif; opacity:1; transition:opacity 180ms ease; }
     @media (max-height:320px) { #orbRoot { width:min(88vw, 300px); } }
     @media (prefers-reduced-motion: reduce) { speaking-orb { transition:none; } }
   </style>
@@ -36,6 +36,7 @@
       const taskAnimations = {
         understanding:'breathing',
         planning:'composing',
+        searching:'searching',
         observing:'searching',
         resolving_target:'searching',
         acting:'working',
@@ -156,12 +157,49 @@
         if (isThinkingVisible) drawThinkingFrame(performance.now());
       }
 
+      function syncOrbVisualState() {
+        if (!orb) return;
+        // Audio and microphone states have priority. Background task updates may not
+        // override real playback/listening and may not make the main Orb flicker.
+        let visualState = primaryState;
+        if (primaryState === 'speaking' || primaryState === 'listening' || primaryState === 'searching') {
+          visualState = primaryState;
+        } else if (forcedAnimation) {
+          visualState = forcedAnimation === 'searching' ? 'searching'
+            : forcedAnimation === 'listening' ? 'listening' : 'thinking';
+        } else if (taskIsActive) {
+          visualState = taskAnimation === 'searching' ? 'searching' : 'thinking';
+        }
+        if (orb.state !== visualState) orb.state = visualState;
+      }
+
       function refreshThinkingVisibility() {
-        // This screen has one deliberately large sphere; task animations are shown in Chat.
-        // Keep the task-state bridge for native callers, but do not allocate or animate a second canvas.
+        // The home screen has one large Speaking Orb, not a hidden second canvas.
+        // Keep the task bridge functional by mapping task state to the visible Orb state.
         isThinkingVisible = false;
         stopThinkingLoop();
         if (root) root.classList.remove('thinking-active');
+        syncOrbVisualState();
+      }
+
+      function finishTextOnlyTurn() {
+        const line = orb && orb.line;
+        if (!line || !line.externalSync || !line.words || !line.words.length) return false;
+        // Real audio owns the timeline. Only synthesize a caption clock when a complete
+        // model turn ends without ever starting playback (text-only/tool/silent response).
+        if (orb.externalAudioActive || line.playbackStarted || !line.waitingForPlayback) return false;
+        const words = line.words.map(word => word.w);
+        if (!orb.estimate) return false;
+        line.words = orb.estimate(words, 0);
+        line.toks = words.slice();
+        line.waitingForPlayback = false;
+        line.after = false;
+        line.captionDustDone = false;
+        line.clearRequested = false;
+        orb.externalAudioTime = 0;
+        orb.externalAudioEndTime = 0;
+        orb.externalAudioEndedAt = performance.now();
+        return true;
       }
 
       function clearTerminalTimer() {
@@ -184,18 +222,31 @@
       }
 
       function setPrimaryState(value) {
+        const nextState = mapState(value);
+        // Native audio samples and streamed text can both report the same state repeatedly.
+        // Treat state as an edge, not a pulse: idempotent updates must not restart/reset the Orb.
+        if (nextState === primaryState) return false;
+        const previousState = primaryState;
         const wasSpeaking = primaryState === 'speaking';
-        primaryState = mapState(value);
+        primaryState = nextState;
         forcedAnimation = null;
-        if (orb) orb.state = primaryState;
+        if ((previousState === 'thinking' || previousState === 'searching') &&
+            (primaryState === 'done' || primaryState === 'listening') && !orb?.externalAudioActive) {
+          finishTextOnlyTurn();
+        }
         if (wasSpeaking && primaryState !== 'speaking' && terminalTaskStates.has(taskState)) {
           scheduleTerminalClear(completionToken, taskState);
         }
         refreshThinkingVisibility();
+        return true;
       }
 
       function setTaskState(value) {
-        taskState = String(value || 'idle').toLowerCase().replace(/[\s-]+/g, '_');
+        const nextTaskState = String(value || 'idle').toLowerCase().replace(/[\s-]+/g, '_');
+        // Progress collectors can report the same task status repeatedly. Treat it as one
+        // state edge so an unchanged task cannot restart its animation or completion timer.
+        if (nextTaskState === taskState) return false;
+        taskState = nextTaskState;
         completionToken++;
         const token = completionToken;
         clearTerminalTimer();
@@ -203,18 +254,19 @@
           taskIsActive = false;
           taskAnimation = null;
           refreshThinkingVisibility();
-          return;
+          return true;
         }
         if (terminalTaskStates.has(taskState)) {
           taskIsActive = true;
           taskAnimation = taskState === 'completed' ? 'solving' : (taskAnimations[taskState] || 'shaping');
           refreshThinkingVisibility();
           scheduleTerminalClear(token, taskState);
-          return;
+          return true;
         }
         taskIsActive = true;
         taskAnimation = taskAnimations[taskState] || 'working';
         refreshThinkingVisibility();
+        return true;
       }
 
       const appendText = value => {
@@ -234,22 +286,32 @@
           // the previous response's playback position; re-anchor when this track starts.
           orb.line = {
             toks: [], words: [], t0: 0, live: true, who: 'assistant', externalSync: true,
-            waitingForPlayback: !orb.externalAudioActive
+            waitingForPlayback: !orb.externalAudioActive,
+            playbackStarted: !!orb.externalAudioActive
           };
         }
         let delta = next.slice(currentText.length);
         if (delta && currentText && !/^\s/.test(delta)) {
-          // Streaming updates can finish the currently forming word without adding another one.
+          // A provider may extend the final partial word and then include more words in the
+          // same delta ("Merha" -> "Merhaba dünya"). Merge only the prefix before the first
+          // whitespace into the existing word; tokenize the remainder as newly arriving words.
           const line = orb.line;
-          if (line && line.words.length && !/\s/.test(delta)) {
-            const last = line.words[line.words.length - 1];
-            last.w += delta;
-            if (line.externalSync && !line.waitingForPlayback && orb.externalAudioActive) {
-              last.end = Math.max(last.end, (Number(orb.externalAudioTime) || 0) + 0.12);
+          if (line && line.words.length && !/\s$/.test(currentText)) {
+            const boundary = delta.search(/\s/);
+            const continuation = boundary < 0 ? delta : delta.slice(0, boundary);
+            if (continuation) {
+              const last = line.words[line.words.length - 1];
+              last.w += continuation;
+              if (line.externalSync && !line.waitingForPlayback && orb.externalAudioActive) {
+                last.end = Math.max(last.end, (Number(orb.externalAudioTime) || 0) + 0.12);
+              }
+              line.toks[line.toks.length - 1] = last.w;
+              line.after = false;
+              delta = boundary < 0 ? '' : delta.slice(boundary);
             }
-            line.toks[line.toks.length - 1] = last.w;
+          }
+          if (!delta) {
             currentText = next;
-            line.after = false;
             if (orb.externalAudioActive) setPrimaryState('speaking');
             return;
           }
@@ -280,13 +342,22 @@
       window.JarvisOrb = {
         setState: setPrimaryState,
         setTaskState,
-        // Optional direct API: choose any of the nine bundled animation presets.
+        // Home Orb supports five state-driven visuals; chat retains all nine detailed presets.
+        // The requested task preset is mapped to a real visible home state, never a no-op canvas.
         setThinkingAnimation: value => {
           const key = String(value || '').toLowerCase();
-          forcedAnimation = animationNames.has(key) ? key : null;
+          const nextAnimation = animationNames.has(key) ? key : null;
+          if (nextAnimation === forcedAnimation) return false;
+          forcedAnimation = nextAnimation;
           refreshThinkingVisibility();
+          return true;
         },
-        clearThinkingAnimation: () => { forcedAnimation = null; refreshThinkingVisibility(); },
+        clearThinkingAnimation: () => {
+          if (forcedAnimation === null) return false;
+          forcedAnimation = null;
+          refreshThinkingVisibility();
+          return true;
+        },
         setTheme: value => {
           const key = String(value || 'light').toLowerCase();
           const filters = { light:'saturate(.9)', dark:'hue-rotate(145deg) saturate(.95)', red:'hue-rotate(-36deg) saturate(1.45)', sunset:'hue-rotate(58deg) saturate(1.1)' };
@@ -323,6 +394,7 @@
           const playbackStarted = nextActive && !wasActive;
           const line = orb.line;
           if (nextActive) {
+            if (line && line.externalSync) line.playbackStarted = true;
             orb.externalAudioEndedAt = null;
           } else if (wasActive) {
             orb.externalAudioEndedAt = performance.now();

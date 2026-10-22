@@ -27,6 +27,8 @@ class HeadsetAudioRouter(private val context: Context) {
     private var isScoStarted = false
     @Volatile
     private var cachedIsHeadsetConnected = false
+    @Volatile
+    private var communicationRouteActive = false
 
     private val headsetReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -98,6 +100,10 @@ class HeadsetAudioRouter(private val context: Context) {
      */
     fun isHeadsetConnected(): Boolean = cachedIsHeadsetConnected
 
+    /** True only when a communication route was selected (not merely requested). */
+    fun isCommunicationModeActive(): Boolean =
+        communicationRouteActive && audioManager.mode == AudioManager.MODE_IN_COMMUNICATION
+
     private fun findConnectedHeadset(): AudioDeviceInfo? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val available = audioManager.availableCommunicationDevices
@@ -134,6 +140,7 @@ class HeadsetAudioRouter(private val context: Context) {
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val success = audioManager.setCommunicationDevice(targetHeadset)
+                    communicationRouteActive = success
                     Log.i(TAG, "setCommunicationDevice: ${targetHeadset.productName} -> success=$success")
                 } else {
                     if (audioManager.isBluetoothScoAvailableOffCall && !audioManager.isBluetoothScoOn) {
@@ -141,15 +148,17 @@ class HeadsetAudioRouter(private val context: Context) {
                         audioManager.isBluetoothScoOn = true
                         isScoStarted = true
                     }
+                    // Before Android 12 the platform selects a wired headset automatically;
+                    // Bluetooth communication uses SCO above.
+                    communicationRouteActive = true
                 }
                 audioManager.isSpeakerphoneOn = false
             } else {
-                // No Headset Connected: Ensure STRICT routing to LOUDSPEAKER
-                Log.i(TAG, "No external headset connected. Routing strictly to LOUDSPEAKER (main speaker).")
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    audioManager.clearCommunicationDevice()
-                }
+                // No external headset: keep playback on the main loudspeaker, but use Android's
+                // communication route so VOICE_COMMUNICATION capture can benefit from AEC.
+                // If the OS cannot select the built-in speaker as a communication device, fall
+                // back to ordinary media routing and let the VAD use its conservative no-AEC path.
+                Log.i(TAG, "No external headset connected. Selecting built-in speaker for communication audio.")
 
                 if (isScoStarted) {
                     try {
@@ -159,11 +168,33 @@ class HeadsetAudioRouter(private val context: Context) {
                     isScoStarted = false
                 }
 
-                // Return to MODE_NORMAL so all media audio plays through the main loudspeaker
-                audioManager.mode = AudioManager.MODE_NORMAL
-                audioManager.isSpeakerphoneOn = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val builtInSpeaker = audioManager.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    val routed = builtInSpeaker?.let { audioManager.setCommunicationDevice(it) } == true
+                    if (!routed) {
+                        audioManager.clearCommunicationDevice()
+                        // Keep the legacy speakerphone fallback, but do not claim the route is
+                        // suitable for AEC. The detector therefore uses its guarded fallback.
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                        audioManager.isSpeakerphoneOn = true
+                        communicationRouteActive = false
+                        Log.w(TAG, "Communication speaker route unavailable; keeping speakerphone fallback without trusted AEC.")
+                    } else {
+                        communicationRouteActive = true
+                        Log.i(TAG, "Communication route selected: ${builtInSpeaker?.productName ?: "built-in speaker"}; AEC may be used when the effect reports enabled.")
+                    }
+                } else {
+                    // Pre-Android 12 speakerphone routing uses MODE_IN_COMMUNICATION + speakerphone.
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = true
+                    communicationRouteActive = true
+                }
             }
         } catch (e: Exception) {
+            communicationRouteActive = false
             Log.w(TAG, "Failed in routeToOptimalAudio: ${e.message}")
         }
     }
@@ -198,6 +229,7 @@ class HeadsetAudioRouter(private val context: Context) {
 
             audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.isSpeakerphoneOn = true
+            communicationRouteActive = false
             cachedIsHeadsetConnected = false
             Log.i(TAG, "HeadsetAudioRouter stopped, audio mode reset to NORMAL (speakerphone active).")
         } catch (e: Exception) {

@@ -139,6 +139,8 @@
             <!-- Chip 1: Jarvis Persona -->
             <LinearLayout
                 android:id="@+id/chipPersona"
+                android:clickable="false"
+                android:focusable="false"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:orientation="horizontal"
@@ -168,6 +170,8 @@
             <!-- Chip 2: Mode / Code -->
             <LinearLayout
                 android:id="@+id/chipMode"
+                android:clickable="false"
+                android:focusable="false"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:orientation="horizontal"

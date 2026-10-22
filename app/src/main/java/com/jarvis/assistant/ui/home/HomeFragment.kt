@@ -45,6 +45,7 @@ class HomeFragment : Fragment() {
     private var pendingThemeKey: String? = null
     private var pendingCustomHex: String? = null
     private var lastAudioPushTime = 0L
+    @Volatile private var lastPushedPlaybackActive: Boolean? = null
     private var lastAutoNavigatedSearchState: String? = null
     private var taskFallbackPanel: android.widget.LinearLayout? = null
     private var taskFallbackText: android.widget.TextView? = null
@@ -152,6 +153,14 @@ class HomeFragment : Fragment() {
             }
 
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    isPageLoaded = false
+                    // Force the latest playback state to be replayed after the WebView reloads.
+                    lastPushedPlaybackActive = null
+                    lastAudioPushTime = 0L
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     isPageLoaded = true
@@ -170,6 +179,17 @@ class HomeFragment : Fragment() {
                     }
                     setOrbState(state)
                     setOrbTaskState(pendingTaskState ?: com.jarvis.assistant.automation.agent.AgentTaskEngine.taskState.value?.currentStatus ?: "IDLE")
+
+                    // Seed the bridge immediately with the current AudioTrack state. StateFlow
+                    // does not guarantee another emission merely because this WebView reloaded.
+                    val frequency = viewModel.audioFrequency.value
+                    pushExternalAudio(
+                        frequency.amplitude,
+                        frequency.bass,
+                        frequency.high,
+                        viewModel.audioPlaybackPositionMs.value,
+                        viewModel.audioPlaybackActive.value
+                    )
                 }
             }
 
@@ -251,11 +271,15 @@ class HomeFragment : Fragment() {
     private fun pushExternalAudio(amp: Float, bass: Float, high: Float, playbackPositionMs: Long, playbackActive: Boolean) {
         if (!isPageLoaded) return
         val now = System.currentTimeMillis()
-        if (now - lastAudioPushTime < 33L) return // ~30 calls per second throttle
+        val playbackEdge = lastPushedPlaybackActive != playbackActive
+        // Throttle animation samples, never lifecycle edges. Losing the final false edge makes
+        // the WebView believe AudioTrack is still playing forever, so captions never dust out.
+        if (!playbackEdge && now - lastAudioPushTime < 33L) return // ~30 samples per second
         lastAudioPushTime = now
         activity?.runOnUiThread {
             val webView = _binding?.orbWebView ?: return@runOnUiThread
             webView.evaluateJavascript("window.JarvisOrb && window.JarvisOrb.setExternalAudio($amp, $bass, $high, $playbackPositionMs, $playbackActive);", null)
+            lastPushedPlaybackActive = playbackActive
         }
     }
 
@@ -425,14 +449,34 @@ class HomeFragment : Fragment() {
                                 Color.parseColor("#64748B")
                             )
                         } else if (status.isMuted) {
-                            setOrbState("idle")
-                            binding.tvListeningStatus.text = "MIC MUTED (OFF) • TAP TO TALK"
-                            binding.tvListeningStatus.setTextColor(Color.parseColor("#EF4444"))
-                            binding.tvHoldHint.text = "Microphone is muted • Tap mic to unmute"
+                            // Muting the input microphone must not falsify the assistant's output
+                            // state. Keep the Orb in SPEAKING/THINKING while playback/work continues.
+                            when (status.state) {
+                                ConversationState.SPEAKING -> {
+                                    setOrbState("speaking")
+                                    binding.tvListeningStatus.text = "JARVIS SPEAKING • MIC MUTED"
+                                    binding.tvListeningStatus.setTextColor(Color.parseColor("#06B6D4"))
+                                    binding.dotStatusGlow.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#06B6D4"))
+                                }
+                                ConversationState.THINKING -> {
+                                    setOrbState("thinking")
+                                    binding.tvListeningStatus.text = "THINKING • MIC MUTED"
+                                    binding.tvListeningStatus.setTextColor(Color.parseColor("#F59E0B"))
+                                    binding.dotStatusGlow.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#F59E0B"))
+                                }
+                                else -> {
+                                    setOrbState("idle")
+                                    binding.tvListeningStatus.text = "MIC MUTED (OFF) • TAP TO TALK"
+                                    binding.tvListeningStatus.setTextColor(Color.parseColor("#EF4444"))
+                                    binding.dotStatusGlow.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
+                                }
+                            }
+                            binding.tvHoldHint.text = if (status.state == ConversationState.SPEAKING || status.state == ConversationState.THINKING) {
+                                "Microphone muted • Jarvis continues"
+                            } else {
+                                "Microphone is muted • Tap mic to unmute"
+                            }
                             binding.tvHoldHint.visibility = View.VISIBLE
-                            binding.dotStatusGlow.backgroundTintList = ColorStateList.valueOf(
-                                Color.parseColor("#EF4444")
-                            )
                         } else if (status.isStandby) {
                             setOrbState("idle")
                             binding.tvListeningStatus.text = "STANDBY • SAY 'HEY JARVIS'"

@@ -35,8 +35,10 @@ import org.vosk.android.RecognitionListener as VoskRecognitionListener
 import org.vosk.android.SpeechService
 import com.jarvis.assistant.audio.AudioPlayer
 import com.jarvis.assistant.audio.AudioRecorder
+import com.jarvis.assistant.audio.VoiceBargeInDetector
 import com.jarvis.assistant.data.model.ConversationState
 import com.jarvis.assistant.network.GeminiLiveWebSocket
+import com.jarvis.assistant.network.StreamingTextAccumulator
 import com.jarvis.assistant.ui.home.MainActivity
 import com.jarvis.assistant.util.PermissionHelper
 import com.jarvis.assistant.util.PromptGenerator
@@ -97,6 +99,7 @@ class JarvisConversationService : Service() {
         private const val NOTIFICATION_ID = 41
         private const val INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000L // 30 minutes before standby
         private const val STANDBY_COOLDOWN_MS = 2500L
+        private const val LIVE_CAPTION_TAIL_MS = 3000L
 
         @Volatile private var activeInstance: JarvisConversationService? = null
 
@@ -117,6 +120,7 @@ class JarvisConversationService : Service() {
             _liveError.value = error
         }
 
+        private val conversationStateLock = Any()
         private val _conversationState = MutableStateFlow(ConversationState.IDLE)
         val conversationState: StateFlow<ConversationState> = _conversationState.asStateFlow()
 
@@ -159,10 +163,9 @@ class JarvisConversationService : Service() {
 
         fun interruptPlayback() {
             activeInstance?.let { service ->
-                if (_conversationState.value == ConversationState.SPEAKING) {
-                    Log.i("JarvisService", "Manual interruption: stopping audio playback")
-                    service.audioPlayer?.flush()
-                    _conversationState.value = ConversationState.LISTENING
+                if (_conversationState.value == ConversationState.SPEAKING || service.audioPlayer?.isPlaying() == true) {
+                    Log.i("JarvisService", "Manual interruption: stopping audio playback and returning to listening")
+                    service.interruptAssistantPlaybackForUser()
                 }
             }
         }
@@ -260,9 +263,11 @@ class JarvisConversationService : Service() {
                 [NEW USER MESSAGE]
                 $text
             """.trimIndent()
-            instance.currentTurnUserText.clear()
-            instance.currentTurnUserText.append(text)
-            instance.currentTurnAssistantText.clear()
+            synchronized(instance.currentTurnUserText) {
+                instance.currentTurnUserText.setLength(0)
+                instance.currentTurnUserText.append(text)
+            }
+            instance.clearAssistantTranscript()
             val sent = socket.sendClientContent(chatEnvelope)
             if (sent) JarvisApp.instance.chatRepository.addTurn(text, "")
             return sent
@@ -291,10 +296,10 @@ class JarvisConversationService : Service() {
                 $analysisPrompt
             """.trimIndent()
             synchronized(instance.currentTurnUserText) {
-                instance.currentTurnUserText.clear()
+                instance.clearUserTranscript()
                 instance.currentTurnUserText.append(displayText)
             }
-            synchronized(instance.currentTurnAssistantText) { instance.currentTurnAssistantText.clear() }
+            synchronized(instance.currentTurnAssistantText) { instance.clearAssistantTranscript() }
             val sent = if (imageFrames.isEmpty() && audioPcm16k.isEmpty()) {
                 socket.sendClientContent(envelope)
             } else {
@@ -324,17 +329,52 @@ class JarvisConversationService : Service() {
     private var inactivityJob: Job? = null
     private val currentTurnAssistantText = StringBuilder()
     private val currentTurnUserText = StringBuilder()
+
+    // Provider/WebSocket, microphone, and playback callbacks can touch these buffers on different
+    // threads. Every snapshot and clear uses the same monitor as its corresponding append.
+    private fun assistantTranscriptSnapshot(): String = synchronized(currentTurnAssistantText) {
+        currentTurnAssistantText.toString()
+    }
+
+    private fun userTranscriptSnapshot(): String = synchronized(currentTurnUserText) {
+        currentTurnUserText.toString()
+    }
+
+    private fun clearAssistantTranscript() {
+        synchronized(currentTurnAssistantText) { currentTurnAssistantText.setLength(0) }
+    }
+
+    private fun clearUserTranscript() {
+        synchronized(currentTurnUserText) { currentTurnUserText.setLength(0) }
+    }
+
+    @Volatile private var liveAssistantResponseClearJob: Job? = null
     private var lastUserSpeechDetectedTime = 0L
-    private var lastPlaybackEndTime = 0L
-    private var hasSpeechInCurrentUtterance = false
-    private var hasSignalledUtteranceEnd = false
+    @Volatile private var lastPlaybackEndTime = 0L
+    @Volatile private var handlingUserPlaybackInterrupt = false
+    @Volatile private var userInterruptFinalizedByCallback = false
+    @Volatile private var providerTurnComplete = true
+    @Volatile private var suppressInterruptedProviderTurn = false
+    // Serializes provider output enqueue/append with interruption + playback flush. Without this
+    // gate a callback could pass the boolean check, lose a race to flush(), and enqueue stale PCM
+    // or append old caption text after the new user turn had already started.
+    private val providerOutputGateLock = Any()
+    @Volatile private var isBargeInTurnPending = false
+    @Volatile private var isVoiceBargeInUtteranceActive = false
+    private val bargeInDetector = VoiceBargeInDetector()
+    private val bargeInAudioLock = Any()
+    private val bargeInCandidateAudio = java.util.ArrayDeque<ByteArray>(20)
+    @Volatile private var turnCompletionIdleJob: Job? = null
+    @Volatile private var interruptedOutputSuppressionJob: Job? = null
+    private val postPlaybackEchoGuardMs = 240L
+    private val bargeInSpeechEndSilenceMs = 320L
+    @Volatile private var hasSpeechInCurrentUtterance = false
+    @Volatile private var hasSignalledUtteranceEnd = false
     private var consecutiveVoicedFrames = 0
-    private var totalVoicedFramesInCurrentUtterance = 0
-    private var ambientNoiseFloor = 0.03f
+    @Volatile private var totalVoicedFramesInCurrentUtterance = 0
+    @Volatile private var ambientNoiseFloor = 0.03f
     private var thinkingTimeoutJob: Job? = null
     private var isPendingBackgroundTransition = false
-    @Volatile
-    private var suppressAudioUntilTurnComplete = false
     @Volatile
     private var isExecutingTool = false
     private val currentUtteranceAudioStream = java.io.ByteArrayOutputStream()
@@ -447,7 +487,7 @@ class JarvisConversationService : Service() {
     }
 
     private fun automationToolTimeoutMs(): Long {
-        val goal = autonomousTaskGoal.ifBlank { currentTurnUserText.toString() }.lowercase(Locale.ROOT)
+        val goal = autonomousTaskGoal.ifBlank { userTranscriptSnapshot() }.lowercase(Locale.ROOT)
         val bulk = com.jarvis.assistant.automation.agent.TaskGoal.fromUserUtterance(goal).isBulkAction
         return when {
             bulk && goal.contains("instagram") -> 480_000L
@@ -550,9 +590,76 @@ class JarvisConversationService : Service() {
     }
 
     private fun setConversationState(state: ConversationState) {
-        if (_conversationState.value != state) {
-            _conversationState.value = state
-            updateNotification()
+        // WebSocket, AudioTrack, recorder, and UI callbacks may call this concurrently. Serialize
+        // the read/policy/write as one transaction so two stale events cannot overwrite each other.
+        val changed = synchronized(conversationStateLock) {
+            val current = _conversationState.value
+            // The queue counts as active too: a network callback may enqueue the next PCM chunk
+            // between two AudioTrack callbacks. Stale THINKING/IDLE events must not change the Orb
+            // while another chunk is waiting to play.
+            val playbackActive = _audioPlaybackActive.value || audioPlayer?.isPlaying() == true
+            if (!com.jarvis.assistant.data.model.ConversationStatePolicy.shouldApply(
+                    current = current,
+                    requested = state,
+                    playbackActive = playbackActive,
+                    userInterrupting = handlingUserPlaybackInterrupt
+                )) {
+                false
+            } else {
+                _conversationState.value = state
+                true
+            }
+        }
+        if (changed) updateNotification()
+    }
+
+    /** Stops output only after a deliberate tap or a sustained, conservative user-voice candidate. */
+    private fun interruptAssistantPlaybackForUser(userVoiceConfirmed: Boolean = false) {
+        handlingUserPlaybackInterrupt = true
+        userInterruptFinalizedByCallback = false
+        var shouldSuppressProviderTurn = false
+        synchronized(providerOutputGateLock) {
+            // The provider can finish generating text/audio before the speaker finishes rendering
+            // its queued PCM. A barge-in during that tail must still suppress any trailing packets.
+            // Read both conditions and flush under the same gate used by provider callbacks.
+            shouldSuppressProviderTurn = !providerTurnComplete ||
+                audioPlayer?.isPlaying() == true || _audioPlaybackActive.value ||
+                _conversationState.value == ConversationState.SPEAKING
+            if (shouldSuppressProviderTurn) suppressInterruptedProviderTurn = true
+            audioPlayer?.flush()
+        }
+        if (shouldSuppressProviderTurn) {
+            interruptedOutputSuppressionJob?.cancel()
+            interruptedOutputSuppressionJob = serviceScope.launch {
+                delay(5_000L)
+                if (suppressInterruptedProviderTurn && !hasSpeechInCurrentUtterance && !isBargeInTurnPending) {
+                    synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+                    Log.w("JarvisService", "Interrupted-output suppression expired because no user speech followed")
+                }
+                interruptedOutputSuppressionJob = null
+            }
+        }
+        if (userVoiceConfirmed) {
+            isBargeInTurnPending = true
+            isVoiceBargeInUtteranceActive = true
+        }
+        val hadPendingTurnText = assistantTranscriptSnapshot().isNotEmpty() || userTranscriptSnapshot().isNotEmpty()
+        try {
+            try { tts?.stop() } catch (_: Exception) {}
+        } finally {
+            // AudioPlayer notifies synchronously when it had actually started. If playback was
+            // still queued and never entered PLAYING, finalize the partial turn here instead.
+            if (!userInterruptFinalizedByCallback && hadPendingTurnText) {
+                finalizeTurn(preserveCaptionTail = true)
+            }
+            _audioPlaybackActive.value = false
+            _audioPlaybackPositionMs.value = 0L
+            // Do not mute the user's first post-barge-in frames behind the acoustic-tail guard.
+            lastPlaybackEndTime = System.currentTimeMillis() - 1_000L
+            bargeInDetector.reset()
+            synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
+            setConversationState(ConversationState.LISTENING)
+            handlingUserPlaybackInterrupt = false
         }
     }
 
@@ -874,16 +981,36 @@ class JarvisConversationService : Service() {
 
         _isSessionOn.value = true
         _isStandby.value = false
+        // Every new live session starts with a clean audio/state machine. A late provider callback
+        // from a previously interrupted stream must not leave the new conversation muted or stuck.
+        providerTurnComplete = true
+        synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+        handlingUserPlaybackInterrupt = false
+        userInterruptFinalizedByCallback = false
+        isBargeInTurnPending = false
+        isVoiceBargeInUtteranceActive = false
+        turnCompletionIdleJob?.cancel()
+        turnCompletionIdleJob = null
+        interruptedOutputSuppressionJob?.cancel()
+        interruptedOutputSuppressionJob = null
+        bargeInDetector.reset()
+        synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
+        _audioPlaybackActive.value = false
+        _audioPlaybackPositionMs.value = 0L
+        _audioLevel.value = 0f
         lastResponseTimedOut = false
         val now = System.currentTimeMillis()
+        // No playback has occurred in a new session, so do not apply a post-audio echo guard
+        // that could discard the user's first syllable at startup.
+        lastPlaybackEndTime = 0L
         lastUserSpeechDetectedTime = now
         lastOwnerVerifiedTimestamp = now
         isCurrentTurnOwnerVoiceVerified = !preferences.isOwnerVoiceEnabled || !preferences.hasOwnerVoiceProfile()
         pendingToolCalls.clear()
         hasSpeechInCurrentUtterance = false
         hasSignalledUtteranceEnd = false
-        currentTurnAssistantText.clear()
-        currentTurnUserText.clear()
+        clearAssistantTranscript()
+        clearUserTranscript()
         startInactivityTimer()
         setConversationState(ConversationState.IDLE)
         updateNotification()
@@ -893,6 +1020,8 @@ class JarvisConversationService : Service() {
             onPlaybackStateChanged = { isPlaying ->
                 _audioPlaybackActive.value = isPlaying
                 if (isPlaying) {
+                    turnCompletionIdleJob?.cancel()
+                    turnCompletionIdleJob = null
                     _audioPlaybackPositionMs.value = 0L
                     if (pendingWelcomeAudio) {
                         pendingWelcomeAudio = false
@@ -900,10 +1029,20 @@ class JarvisConversationService : Service() {
                     }
                     setConversationState(ConversationState.SPEAKING)
                 } else {
-                    lastPlaybackEndTime = System.currentTimeMillis()
-                    finalizeTurn()
-                    if (_isSessionOn.value) {
-                        setConversationState(ConversationState.IDLE)
+                    if (handlingUserPlaybackInterrupt) {
+                        // Do not publish an intermediate IDLE state during a user barge-in; that
+                        // flicker changes the Orb animation from speaking -> idle -> listening.
+                        lastPlaybackEndTime = System.currentTimeMillis() - 1_000L
+                        finalizeTurn(preserveCaptionTail = true)
+                        userInterruptFinalizedByCallback = true
+                        _audioLevel.value = 0f
+                        _audioFrequency.value = com.jarvis.assistant.audio.AudioFrequencyData()
+                    } else {
+                        lastPlaybackEndTime = System.currentTimeMillis()
+                        finalizeTurn(preserveCaptionTail = true)
+                        if (_isSessionOn.value) {
+                            setConversationState(ConversationState.IDLE)
+                        }
                     }
                 }
             },
@@ -921,6 +1060,10 @@ class JarvisConversationService : Service() {
             },
             onPlaybackProgress = { elapsedMs ->
                 _audioPlaybackPositionMs.value = elapsedMs.coerceAtLeast(0L)
+            },
+            onPlaybackError = { message ->
+                Log.e("JarvisService", "Audio playback failed: $message")
+                _events.tryEmit("Ses çalma hatası: Ses çıkışı başlatılamadı veya PCM verisi tamamen yazılamadı. Ses/medya yönlendirmesini kontrol et ve yeniden dene.")
             }
         ).apply { start() }
 
@@ -983,13 +1126,20 @@ class JarvisConversationService : Service() {
                         private var audioChunksReceivedInTurn = 0
 
                         override fun onAudioDataReceived(pcmData: ByteArray) {
+                            synchronized(providerOutputGateLock) {
+                            // Test interruption gates BEFORE touching timers. A stale PCM packet
+                            // from the cancelled response must not cancel the safety timeout for
+                            // the user's replacement turn.
+                            if (suppressInterruptedProviderTurn) {
+                                Log.d("JarvisService", "Discarding stale audio from the interrupted provider turn")
+                                return
+                            }
+                            turnCompletionIdleJob?.cancel()
+                            turnCompletionIdleJob = null
                             thinkingTimeoutJob?.cancel()
                             thinkingTimeoutJob = null
                             lastResponseTimedOut = false
-                            if (suppressAudioUntilTurnComplete) {
-                                Log.w("JarvisService", "onAudioDataReceived: Audio suppressed (suppressAudioUntilTurnComplete=true)")
-                                return
-                            }
+                            providerTurnComplete = false
                             // Silent execution applies to task narration, while leaving ordinary
                             // conversation audible. Read the preference dynamically so toggling
                             // it during a session takes effect immediately.
@@ -1012,44 +1162,66 @@ class JarvisConversationService : Service() {
                             if (audioChunksReceivedInTurn % 25 == 1) {
                                 Log.d("JarvisService", "Streaming audio chunk #$audioChunksReceivedInTurn (${pcmData.size} bytes) to AudioPlayer")
                             }
-                            setConversationState(ConversationState.SPEAKING)
+                            // Do not change the Orb merely because a packet arrived. The actual
+                            // AudioTrack playback callback is the authoritative SPEAKING edge.
                             audioPlayer?.enqueueAudio(pcmData)
+                        
+                            }
                         }
 
+                        
+
                         override fun onAssistantTextReceived(textChunk: String) {
-                            if (textChunk.isEmpty()) return
+                            synchronized(providerOutputGateLock) {
+                            if (textChunk.isEmpty() || suppressInterruptedProviderTurn) return
+                            // A following transcript is a new/continuing response, not the
+                            // previous turn's text-only cleanup window.
+                            turnCompletionIdleJob?.cancel()
+                            turnCompletionIdleJob = null
+                            // A new output-transcription edge is the next assistant response, not the
+                            // locally interrupted stream. It becomes the new source of truth.
+                            isBargeInTurnPending = false
+                            isVoiceBargeInUtteranceActive = false
+                            providerTurnComplete = false
+                            // A new streamed answer supersedes a scheduled end-of-caption clear.
+                            liveAssistantResponseClearJob?.cancel()
+                            liveAssistantResponseClearJob = null
+                            val startsNewAssistantTurn = synchronized(currentTurnAssistantText) { assistantTranscriptSnapshot().isEmpty() }
+                            if (startsNewAssistantTurn && _liveAssistantResponse.value.isNotBlank()) {
+                                // Signal a line boundary for back-to-back answers that happen
+                                // to share the same opening words.
+                                _liveAssistantResponse.value = ""
+                            }
                             thinkingTimeoutJob?.cancel()
                             thinkingTimeoutJob = null
                             lastResponseTimedOut = false
                             synchronized(currentTurnAssistantText) {
-                                val chunkToAppend = if (currentTurnAssistantText.isNotEmpty() && currentTurnAssistantText.last() == ' ') {
-                                    textChunk.trimStart()
-                                } else {
-                                    textChunk
-                                }
-                                if (chunkToAppend.isNotEmpty()) {
-                                    if (currentTurnAssistantText.isNotEmpty()) {
-                                        val lastChar = currentTurnAssistantText.last()
-                                        val firstChar = chunkToAppend.first()
-                                        if (!Character.isWhitespace(lastChar) && !Character.isWhitespace(firstChar)) {
-                                            if (Character.isLetterOrDigit(firstChar) || firstChar == '(' || firstChar == '[') {
-                                                currentTurnAssistantText.append(' ')
-                                            }
-                                        }
-                                    }
-                                    currentTurnAssistantText.append(chunkToAppend)
-                                }
+                                // Provider callbacks are transcript deltas, not guaranteed whole words.
+                                // Preserve their exact boundaries: guessing a space between chunks
+                                // splits partial words (for example, "Merha" + "ba dünya").
+                                StreamingTextAccumulator.append(currentTurnAssistantText, textChunk)
                             }
-                            _liveAssistantResponse.value = currentTurnAssistantText.toString().trim()
-                            val assistantText = currentTurnAssistantText.toString().lowercase(Locale.ROOT)
+                            _liveAssistantResponse.value = assistantTranscriptSnapshot().trim()
+                            val assistantText = assistantTranscriptSnapshot().lowercase(Locale.ROOT)
                             Log.d("JarvisService", "Assistant text so far: '$assistantText'")
+                        
+                            }
                         }
+
+                        
 
                         override fun onUserTextReceived(textChunk: String) {
                             lastUserSpeechDetectedTime = System.currentTimeMillis()
                             val trimmed = textChunk.trim()
                             if (trimmed.isNotEmpty()) {
-                                val startsNewUserTurn = currentTurnUserText.isEmpty()
+                                val startsNewUserTurn = userTranscriptSnapshot().isEmpty()
+                                if (startsNewUserTurn) {
+                                    liveAssistantResponseClearJob?.cancel()
+                                    liveAssistantResponseClearJob = null
+                                    // Begin a clean caption turn. The WebView keeps a completed
+                                    // caption's dust-out alive if its final animation is running.
+                                    _liveAssistantResponse.value = ""
+                                }
                                 val answeringTaskBlocker = startsNewUserTurn && isAutonomousTaskRunning && autonomousWaitingForUser
                                 if (answeringTaskBlocker) {
                                     autonomousWaitingForUser = false
@@ -1084,18 +1256,20 @@ class JarvisConversationService : Service() {
                                         autonomousTaskGoal = ""
                                     }
                                 }
-                                if (currentTurnUserText.isNotEmpty() && !currentTurnUserText.endsWith(" ")) {
-                                    currentTurnUserText.append(" ")
+                                synchronized(currentTurnUserText) {
+                                    if (currentTurnUserText.isNotEmpty() && !currentTurnUserText.endsWith(" ")) {
+                                        currentTurnUserText.append(" ")
+                                    }
+                                    currentTurnUserText.append(trimmed)
+                                    _liveUserTranscript.value = currentTurnUserText.toString().trim()
                                 }
-                                currentTurnUserText.append(trimmed)
-                                _liveUserTranscript.value = currentTurnUserText.toString().trim()
                                 if (_conversationState.value == ConversationState.IDLE) {
                                     setConversationState(ConversationState.LISTENING)
                                 }
                             }
                             lastResponseTimedOut = false
                             updateNotification()
-                            val userText = currentTurnUserText.toString().lowercase(Locale.forLanguageTag("tr-TR"))
+                            val userText = userTranscriptSnapshot().lowercase(Locale.forLanguageTag("tr-TR"))
                             if (isDirectInsultAddressedToJarvis(userText)) {
                                 Log.w("JarvisService", "Direct insult detected; ending the active voice session.")
                                 serviceScope.launch { _events.emit("Hakaret içeren ifade algılandı. Sesli oturum kapatıldı.") }
@@ -1112,17 +1286,48 @@ class JarvisConversationService : Service() {
                                 enterStandby(announce = true)
                                 return
                             }
-                            app.memoryManager.learnPreferencesFromConversation(currentTurnUserText.toString())
+                            app.memoryManager.learnPreferencesFromConversation(userTranscriptSnapshot())
                             // Do not run checkAndExecuteCommand on streaming chunks mid-speech!
                             // Gemini Live onToolCall is the authoritative neural intent engine.
                         }
 
                         override fun onInterrupted() {
+                            synchronized(providerOutputGateLock) {
+                            // A server interruption means current output is no longer valid. Protect
+                            // the user’s replacement utterance from trailing PCM/text callbacks and
+                            // flush immediately in speakerphone AND headset modes.
+                            val wasProviderTurnActive = !providerTurnComplete
+                            val userTurnInProgress = hasSpeechInCurrentUtterance ||
+                                userTranscriptSnapshot().isNotBlank() || isBargeInTurnPending
+                            val preserveBargeInInput = isBargeInTurnPending && userTurnInProgress
+                            val isOwnAutoResumeInterrupt = autoResumeAwaitingResponse && !userTurnInProgress
+                            // Internal autonomous continuation interrupts are expected protocol
+                            // edges, not user barge-ins. Do not gate the next milestone response.
+                            if (!isOwnAutoResumeInterrupt && !suppressInterruptedProviderTurn) {
+                                suppressInterruptedProviderTurn = true
+                                interruptedOutputSuppressionJob?.cancel()
+                                interruptedOutputSuppressionJob = serviceScope.launch {
+                                    delay(5_000L)
+                                    if (suppressInterruptedProviderTurn && !hasSpeechInCurrentUtterance && !isBargeInTurnPending) {
+                                        synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+                                        Log.w("JarvisService", "Interrupted-output suppression expired because no replacement utterance followed")
+                                    }
+                                    interruptedOutputSuppressionJob = null
+                                }
+                            }
+                            providerTurnComplete = true
+                            // Flush at the interruption boundary, before task cancellation or cleanup.
+                            // Otherwise the worker could observe a terminal turn, publish IDLE, and
+                            // finalize captions while this callback was still cancelling tools.
+                            val previousHandlingPlaybackInterrupt = handlingUserPlaybackInterrupt
+                            handlingUserPlaybackInterrupt = true
+                            try {
+                                audioPlayer?.flush()
+                            } finally {
+                                handlingUserPlaybackInterrupt = previousHandlingPlaybackInterrupt
+                            }
                             val hasHeadset = headsetAudioRouter?.isHeadsetConnected() == true
-                            Log.w("JarvisService", "onInterrupted received from server (hasHeadset=$hasHeadset, state=${_conversationState.value})")
-                            val userTurnInProgress = hasSpeechInCurrentUtterance || currentTurnUserText.isNotBlank()
-                            val isOwnAutoResumeInterrupt = autoResumeAwaitingResponse &&
-                                !userTurnInProgress
+                            Log.w("JarvisService", "onInterrupted received (activeTurn=$wasProviderTurnActive, hasHeadset=$hasHeadset, state=${_conversationState.value})")
                             if (isOwnAutoResumeInterrupt) {
                                 Log.i("JarvisService", "Preserving task state for the assistant's automatic continuation")
                                 autoResumeAwaitingResponse = false
@@ -1133,7 +1338,7 @@ class JarvisConversationService : Service() {
                                     autonomousAudioBufferBytes = 0
                                 }
                                 cancelAllActiveTools()
-                                if (userTurnInProgress && !isExplicitContinuationUtterance(currentTurnUserText.toString())) {
+                                if (userTurnInProgress && !isExplicitContinuationUtterance(userTranscriptSnapshot())) {
                                     autonomousTaskGoal = ""
                                     autonomousContinuationAttempts = 0
                                     autoResumeAwaitingResponse = false
@@ -1141,34 +1346,45 @@ class JarvisConversationService : Service() {
                             }
                             thinkingTimeoutJob?.cancel()
                             thinkingTimeoutJob = null
-                            suppressAudioUntilTurnComplete = false
-                            if (hasHeadset || _conversationState.value != ConversationState.SPEAKING) {
-                                audioPlayer?.flush()
-                                currentTurnAssistantText.clear()
+
+                            if (!preserveBargeInInput) {
+                                clearAssistantTranscript()
                                 _liveAssistantResponse.value = ""
                             }
                             if (!userTurnInProgress) {
-                                currentTurnUserText.clear()
+                                clearUserTranscript()
                                 _liveUserTranscript.value = ""
                             }
-                            hasSpeechInCurrentUtterance = false
-                            hasSignalledUtteranceEnd = false
-                            consecutiveVoicedFrames = 0
-                            totalVoicedFramesInCurrentUtterance = 0
-                            synchronized(currentUtteranceAudioStream) { currentUtteranceAudioStream.reset() }
-                            clearOwnerPendingAudio()
-                            isCurrentTurnOwnerVoiceVerified = !preferences.isOwnerVoiceEnabled || !preferences.hasOwnerVoiceProfile()
-                            if (_conversationState.value != ConversationState.SPEAKING) {
-                                setConversationState(if (userTurnInProgress) ConversationState.LISTENING else ConversationState.IDLE)
+                            if (!preserveBargeInInput) {
+                                hasSpeechInCurrentUtterance = false
+                                hasSignalledUtteranceEnd = false
+                                consecutiveVoicedFrames = 0
+                                totalVoicedFramesInCurrentUtterance = 0
+                                isVoiceBargeInUtteranceActive = false
+                                synchronized(currentUtteranceAudioStream) { currentUtteranceAudioStream.reset() }
+                                clearOwnerPendingAudio()
+                                isCurrentTurnOwnerVoiceVerified = !preferences.isOwnerVoiceEnabled || !preferences.hasOwnerVoiceProfile()
+                            } else {
+                                Log.i("JarvisService", "Preserving voice VAD/onset buffer for the user's in-progress barge-in")
                             }
+                            setConversationState(if (userTurnInProgress) ConversationState.LISTENING else ConversationState.IDLE)
                             updateNotification()
+                        
+                            }
                         }
 
+                        
+
                         override fun onTurnCompleted() {
+                            synchronized(providerOutputGateLock) {
+                                providerTurnComplete = true
+                            }
+                            // A turnComplete may belong to the response we just stopped locally.
+                            // Preserve suppression until local VAD confirms the user's turn ended.
                             autoResumeAwaitingResponse = false
                             thinkingTimeoutJob?.cancel()
                             thinkingTimeoutJob = null
-                            val assistantTurnText = synchronized(currentTurnAssistantText) { currentTurnAssistantText.toString().trim() }
+                            val assistantTurnText = synchronized(currentTurnAssistantText) { assistantTranscriptSnapshot().trim() }
                             if (isAutonomousContinuationTurn) {
                                 isAutonomousContinuationTurn = false
                                 val bufferedAudio = synchronized(autonomousAudioLock) {
@@ -1180,30 +1396,67 @@ class JarvisConversationService : Service() {
                                 val finalResult = !isAutonomousTaskRunning || !lastCompletedTaskSummary.isNullOrBlank()
                                 val speakUpdate = shouldSpeakAutonomousUpdate(assistantTurnText, finalResult)
                                 if (speakUpdate && bufferedAudio.isNotEmpty()) {
-                                    bufferedAudio.forEach { audioPlayer?.enqueueAudio(it) }
-                                    Log.i("JarvisService", "Playing a new autonomous milestone; buffered repeated narration is discarded")
+                                    val queuedForPlayback = synchronized(providerOutputGateLock) {
+                                        if (suppressInterruptedProviderTurn) {
+                                            false
+                                        } else {
+                                            bufferedAudio.forEach { audioPlayer?.enqueueAudio(it) }
+                                            true
+                                        }
+                                    }
+                                    if (queuedForPlayback) {
+                                        Log.i("JarvisService", "Playing a new autonomous milestone; buffered repeated narration is discarded")
+                                    } else {
+                                        Log.i("JarvisService", "Discarding stale autonomous audio after a user interruption")
+                                    }
                                 } else {
                                     Log.i("JarvisService", "Suppressing repeated or routine speech from automatic task continuation")
                                 }
                             } else if (isAutonomousTaskRunning && assistantTurnText.isNotBlank()) {
                                 rememberAutonomousSpokenUpdate(assistantTurnText)
                             }
-                            audioPlayer?.notifyTurnComplete()
+                            synchronized(providerOutputGateLock) {
+                                if (!suppressInterruptedProviderTurn) audioPlayer?.notifyTurnComplete()
+                            }
                             audioChunksReceivedInTurn = 0
-                            suppressAudioUntilTurnComplete = false
-                            hasSpeechInCurrentUtterance = false
-                            hasSignalledUtteranceEnd = false
-                            consecutiveVoicedFrames = 0
-                            totalVoicedFramesInCurrentUtterance = 0
-                            if (_conversationState.value == ConversationState.THINKING && (audioPlayer == null || !audioPlayer!!.isPlaying())) {
-                                setConversationState(ConversationState.IDLE)
+                                                val preserveBargeInInput = isBargeInTurnPending
+                            if (!preserveBargeInInput) {
+                                hasSpeechInCurrentUtterance = false
+                                hasSignalledUtteranceEnd = false
+                                consecutiveVoicedFrames = 0
+                                totalVoicedFramesInCurrentUtterance = 0
+                                isVoiceBargeInUtteranceActive = false
+                            } else {
+                                Log.i("JarvisService", "Ignoring stale turn-complete reset while barge-in audio is pending")
+                            }
+                            if (!isBargeInTurnPending && _conversationState.value == ConversationState.THINKING && (audioPlayer == null || !audioPlayer!!.isPlaying())) {
+                                turnCompletionIdleJob?.cancel()
+                                turnCompletionIdleJob = serviceScope.launch {
+                                    delay(280)
+                                    if (_conversationState.value == ConversationState.THINKING &&
+                                        providerTurnComplete &&
+                                        (audioPlayer == null || !audioPlayer!!.isPlaying()) &&
+                                        !_audioPlaybackActive.value
+                                    ) {
+                                        // With transcription enabled, a model may return a
+                                        // text-only answer (or a silent/tool result) with no PCM
+                                        // callback to trigger finalizeTurn(). Finalize its transcript
+                                        // after a short guard, preserving its caption tail for dust-out.
+                                        val hasTextOnlyReply = synchronized(currentTurnAssistantText) {
+                                            assistantTranscriptSnapshot().isNotEmpty()
+                                        }
+                                        if (hasTextOnlyReply) finalizeTurn(preserveCaptionTail = true)
+                                        setConversationState(ConversationState.IDLE)
+                                    }
+                                    turnCompletionIdleJob = null
+                                }
                             }
                             lastResponseTimedOut = false
                             updateNotification()
 
                             // Owner voice gating: if owner-only mode is active and speaker was not verified, ignore turn completely
-                            if (preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile() && !isCurrentTurnOwnerVoiceVerified) {
-                                val nonOwnerUtterance = currentTurnUserText.toString().trim()
+                            if (!isBargeInTurnPending && preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile() && !isCurrentTurnOwnerVoiceVerified) {
+                                val nonOwnerUtterance = userTranscriptSnapshot().trim()
                                 Log.w("JarvisService", "Turn completed by NON-OWNER: Suppressing response and logging ignored.")
                                 val app = application as? JarvisApp
                                 val loggedQuery = if (nonOwnerUtterance.isNotEmpty()) nonOwnerUtterance else "(Unrecognized voice)"
@@ -1212,19 +1465,19 @@ class JarvisConversationService : Service() {
                                     jarvisText = "[IGNORED] Voice not recognized as owner"
                                 )
                                 audioPlayer?.flush()
-                                currentTurnAssistantText.clear()
-                                currentTurnUserText.clear()
+                                clearAssistantTranscript()
+                                clearUserTranscript()
                                 _liveAssistantResponse.value = ""
                                 _liveUserTranscript.value = ""
                                 processPendingToolCalls(verified = false)
                                 return
                             }
 
-                            val userUtterance = currentTurnUserText.toString().trim()
+                            val userUtterance = userTranscriptSnapshot().trim()
                             if (userUtterance.isNotEmpty()) {
                                 app.memoryManager.learnPreferencesFromConversation(userUtterance)
                             }
-                            val assistantText = currentTurnAssistantText.toString().lowercase(Locale.ROOT)
+                            val assistantText = assistantTranscriptSnapshot().lowercase(Locale.ROOT)
                             val isConfused = assistantText.contains("not understand") ||
                                     assistantText.contains("didn't understand") ||
                                     assistantText.contains("don't understand") ||
@@ -1235,7 +1488,7 @@ class JarvisConversationService : Service() {
                             // Only run fallback if Gemini Live did NOT call a tool AND did not express confusion
                             if (!hasExecutedCommandInCurrentTurn && !isConfused) {
                                 checkAndExecuteCommand(userUtterance)
-                                checkAssistantTextForCommands(currentTurnAssistantText.toString())
+                                checkAssistantTextForCommands(assistantTranscriptSnapshot())
                             }
 
                             // Reset verification flag for the next conversational turn
@@ -1289,7 +1542,7 @@ class JarvisConversationService : Service() {
                                 autonomousLoopJob?.cancel()
                                 autonomousLoopJob = null
                             } else if (isAutonomousTaskRunning) {
-                                val response = currentTurnAssistantText.toString().trim().ifBlank { "The Instagram bulk task is still in progress." }
+                                val response = assistantTranscriptSnapshot().trim().ifBlank { "The Instagram bulk task is still in progress." }
                                 val needsUserDecision = assistantNeedsUserDecision(response)
                                 val continuationLimit = 25
                                 if (!autonomousWaitingForUser && !needsUserDecision && autonomousContinuationAttempts < continuationLimit) {
@@ -1397,6 +1650,12 @@ class JarvisConversationService : Service() {
                         }
 
                         override fun onError(message: String, isFatal: Boolean, errorCode: String?) {
+                            synchronized(providerOutputGateLock) {
+                                // A transport/API failure may close the stream without turnComplete.
+                                // Let buffered speech drain unless a user interruption invalidated it.
+                                providerTurnComplete = true
+                                if (!suppressInterruptedProviderTurn) audioPlayer?.notifyTurnComplete()
+                            }
                             Log.e("JarvisService", "GeminiLive onError: fatal=$isFatal, code=$errorCode, msg=$message")
                             updateNotification()
                             serviceScope.launch { _events.emit(message) }
@@ -1468,55 +1727,91 @@ class JarvisConversationService : Service() {
             if (_isSessionOn.value) {
                 val now = System.currentTimeMillis()
 
-                // Acoustic Echo Decay Protection (AEDP):
-                // For 150ms after speaker audio stops, discard mic chunks so room reverberation
-                // does not bounce into Gemini Live and cause false self-interruption.
-                if (now - lastPlaybackEndTime < 150L) {
+                // Decide whether output is still physically active before applying the acoustic-tail
+                // guard. This keeps voice barge-in available even when a new reply starts quickly.
+                val isSpeakerActive = (audioPlayer?.isPlaying() == true) || (tts?.isSpeaking == true) ||
+                        _audioPlaybackActive.value || (_conversationState.value == ConversationState.SPEAKING)
+
+                // Short post-output guard filters room reverberation. It is deliberately bypassed
+                // while output is active and is shorter than a natural spoken phrase onset.
+                if (!isSpeakerActive && now - lastPlaybackEndTime < postPlaybackEchoGuardMs) {
                     consecutiveVoicedFrames = 0
+                    bargeInDetector.reset()
+                    synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
                     return@AudioRecorder
                 }
 
-                // Assistant is speaking / AudioTrack or TTS is actively playing:
-                val isSpeakerActive = (audioPlayer?.isPlaying() == true) || (tts?.isSpeaking == true) ||
-                        (_conversationState.value == ConversationState.SPEAKING)
-
                 if (isSpeakerActive) {
                     val hasHeadset = headsetAudioRouter?.isHeadsetConnected() == true
-                    // Only allow voice barge-in if headphones/headset are connected AND assistant is already speaking!
-                    // Over the phone loudspeaker, acoustic leakage from speaker into microphone
-                    // hits amplitudes of 0.8-1.0, which causes false self-interruption ("talks in middle and cuts off").
-                    // Over loudspeaker, users tap mic/orb to interrupt, as prompted on screen.
-                    if (hasHeadset) {
-                        if (amplitude > 0.25f) {
-                            consecutiveVoicedFrames++
-                            if (consecutiveVoicedFrames >= 4) {
-                                Log.i("JarvisService", "Headset voice barge-in: user spoke over assistant (amp=$amplitude)")
-                                audioPlayer?.flush()
-                                try { tts?.stop() } catch (_: Exception) {}
-                                setConversationState(ConversationState.LISTENING)
-                                lastUserSpeechDetectedTime = now
-                                hasSpeechInCurrentUtterance = true
-                                hasSignalledUtteranceEnd = false
-                                currentTurnUserText.clear()
-                                currentTurnAssistantText.clear()
-                                _liveUserTranscript.value = ""
-                                _liveAssistantResponse.value = ""
-                                hasExecutedCommandInCurrentTurn = false
-                                totalVoicedFramesInCurrentUtterance = 4
-                                synchronized(currentUtteranceAudioStream) {
-                                    currentUtteranceAudioStream.reset()
-                                    currentUtteranceAudioStream.write(chunk)
-                                }
-                                isCurrentTurnOwnerVoiceVerified = !preferences.isOwnerVoiceEnabled || !preferences.hasOwnerVoiceProfile()
-                                return@AudioRecorder
+                    // Android may report that the AEC effect is enabled even while the router
+                    // has returned speakerphone playback to MODE_NORMAL. Do not trust that flag
+                    // alone: otherwise far-end loudspeaker leakage can be mistaken for the user
+                    // and cut Jarvis off mid-sentence on speakerphone.
+                    val aecActive = audioRecorder?.hasActiveEchoCancellation() == true &&
+                        headsetAudioRouter?.isCommunicationModeActive() == true
+                    val bargeInDetected = bargeInDetector.observe(
+                        micAmplitude = amplitude,
+                        playbackAmplitude = _audioLevel.value,
+                        ambientNoiseFloor = ambientNoiseFloor,
+                        hasHeadset = hasHeadset,
+                        echoCancellationActive = aecActive
+                    )
+                    if (bargeInDetected) {
+                        val onsetFrames = synchronized(bargeInAudioLock) {
+                            bargeInCandidateAudio.toList().toMutableList().also {
+                                it += chunk.copyOf()
+                                bargeInCandidateAudio.clear()
                             }
+                        }
+                        Log.i(
+                            "JarvisService",
+                            "Voice barge-in confirmed (headset=$hasHeadset, aec=$aecActive, " +
+                                "mode=${if (hasHeadset) "headset" else if (aecActive) "speaker-aec" else "speaker-conservative"}, " +
+                                "onsetFrames=${onsetFrames.size}, mic=$amplitude, output=${_audioLevel.value})"
+                        )
+                        interruptAssistantPlaybackForUser(userVoiceConfirmed = true)
+                        lastUserSpeechDetectedTime = now
+                        hasSpeechInCurrentUtterance = true
+                        hasSignalledUtteranceEnd = false
+                        clearUserTranscript()
+                        clearAssistantTranscript()
+                        _liveUserTranscript.value = ""
+                        hasExecutedCommandInCurrentTurn = false
+                        consecutiveVoicedFrames = VAD_START_FRAMES
+                        totalVoicedFramesInCurrentUtterance = onsetFrames.size
+                        synchronized(currentUtteranceAudioStream) {
+                            currentUtteranceAudioStream.reset()
+                            onsetFrames.forEach { currentUtteranceAudioStream.write(it) }
+                        }
+                        isCurrentTurnOwnerVoiceVerified = !preferences.isOwnerVoiceEnabled || !preferences.hasOwnerVoiceProfile()
+                        if (preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile() && !isCurrentTurnOwnerVoiceVerified) {
+                            onsetFrames.forEach { bufferOwnerPendingAudio(it) }
                         } else {
-                            consecutiveVoicedFrames = 0
+                            onsetFrames.forEach { liveWebSocket?.sendAudioChunk(it) }
+                        }
+                    } else if (bargeInDetector.hasCandidate()) {
+                        synchronized(bargeInAudioLock) {
+                            if (bargeInCandidateAudio.size >= 19) bargeInCandidateAudio.removeFirst()
+                            bargeInCandidateAudio.addLast(chunk.copyOf())
                         }
                     } else {
-                        consecutiveVoicedFrames = 0
+                        synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
                     }
-                    // Suppress mic audio from streaming to Gemini ONLY while assistant is physically speaking over loudspeaker.
+                    // While Jarvis speaks, the mic remains locally active for the VAD detector,
+                    // but unclassified room audio is never sent to Gemini. Once real speech is
+                    // confirmed, this current frame and subsequent frames enter the normal stream.
+                    return@AudioRecorder
+                }
+                bargeInDetector.reset()
+                synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
+
+                // The user's utterance has already ended and Gemini is generating a response.
+                // Sending fresh ambient/mic frames during THINKING can make Live VAD interrupt
+                // its own answer before the first speaker chunk is audible. Without a headset,
+                // interruption is driven by the on-screen mic/orb; headset barge-in remains handled
+                // by the active-playback path above.
+                if (_conversationState.value == ConversationState.THINKING) {
+                    consecutiveVoicedFrames = 0
                     return@AudioRecorder
                 }
 
@@ -1548,8 +1843,15 @@ class JarvisConversationService : Service() {
                     preSpeechRingBuffer.addLast(chunk.copyOf())
                 }
 
-                // Dynamic voice threshold: responsive to normal conversational volume (0.035f)
-                val voiceThreshold = maxOf(VAD_MIN_THRESHOLD, ambientNoiseFloor * VAD_NOISE_MULTIPLIER)
+                // Dynamic voice threshold: responsive to normal conversational volume. Right after
+                // playback, raise it briefly so residual echo cannot flicker LISTENING/THINKING.
+                val postPlaybackAge = now - lastPlaybackEndTime
+                val echoTailThreshold = if (postPlaybackAge in postPlaybackEchoGuardMs..650L) 0.105f else 0f
+                val voiceThreshold = maxOf(
+                    VAD_MIN_THRESHOLD,
+                    ambientNoiseFloor * VAD_NOISE_MULTIPLIER,
+                    echoTailThreshold
+                )
 
                 if (amplitude > voiceThreshold) {
                     consecutiveVoicedFrames++
@@ -1560,8 +1862,9 @@ class JarvisConversationService : Service() {
                     // Declare speech start only after several consecutive voiced frames (not a short noise blip)
                     if (consecutiveVoicedFrames >= VAD_START_FRAMES) {
                         if (!hasSpeechInCurrentUtterance) {
-                            currentTurnUserText.clear()
-                            currentTurnAssistantText.clear()
+                            isVoiceBargeInUtteranceActive = false
+                            clearUserTranscript()
+                            clearAssistantTranscript()
                             _liveUserTranscript.value = ""
                             _liveAssistantResponse.value = ""
                             hasExecutedCommandInCurrentTurn = false
@@ -1626,8 +1929,10 @@ class JarvisConversationService : Service() {
                         _audioLevel.value = amplitude
                         _audioFrequency.value = frequencyData
 
-                        // Conversational pause reached (~450ms — safe for natural Hinglish speech with inter-word pauses)
-                        if (silentDuration > 450) {
+                        // A barged-in user gets a slightly quicker end-of-utterance edge so the new
+                        // response is not hidden behind stale-output suppression longer than needed.
+                        val utteranceEndSilenceMs = if (isBargeInTurnPending) bargeInSpeechEndSilenceMs else 450L
+                        if (silentDuration > utteranceEndSilenceMs) {
                             if (preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile()) {
                                 if (!isCurrentTurnOwnerVoiceVerified) {
                                     val audioBytes = synchronized(currentUtteranceAudioStream) {
@@ -1645,7 +1950,7 @@ class JarvisConversationService : Service() {
                                             isCurrentTurnOwnerVoiceVerified = false
                                             clearOwnerPendingAudio()
                                             audioPlayer?.flush()
-                                            currentTurnAssistantText.clear()
+                                            clearAssistantTranscript()
                                             _liveAssistantResponse.value = ""
                                             Log.w("JarvisService", "Speech verification rejected: Non-owner (dist: ${match.distance}, thr: ${match.threshold})")
                                             processPendingToolCalls(verified = false)
@@ -1659,9 +1964,9 @@ class JarvisConversationService : Service() {
                                 }
                             }
 
-                            if (totalVoicedFramesInCurrentUtterance >= VAD_MIN_UTTERANCE_FRAMES || currentTurnUserText.trim().isNotEmpty()) {
+                            if (totalVoicedFramesInCurrentUtterance >= VAD_MIN_UTTERANCE_FRAMES || userTranscriptSnapshot().trim().isNotEmpty()) {
                                 if (preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile() && !isCurrentTurnOwnerVoiceVerified) {
-                                    val nonOwnerQuery = currentTurnUserText.toString().trim()
+                                    val nonOwnerQuery = userTranscriptSnapshot().trim()
                                     Log.w("JarvisService", "Non-owner speech ended: '$nonOwnerQuery'; IGNORING utterance, suppressing reply, and recording to history.")
                                     val app = application as? JarvisApp
                                     val loggedQuery = if (nonOwnerQuery.isNotEmpty()) nonOwnerQuery else "(Unrecognized voice)"
@@ -1670,12 +1975,17 @@ class JarvisConversationService : Service() {
                                         jarvisText = "[IGNORED] Voice not recognized as owner"
                                     )
                                     audioPlayer?.flush()
-                                    currentTurnAssistantText.clear()
-                                    currentTurnUserText.clear()
+                                    clearAssistantTranscript()
+                                    clearUserTranscript()
                                     _liveUserTranscript.value = ""
                                     _liveAssistantResponse.value = ""
                                     hasSpeechInCurrentUtterance = false
                                     hasSignalledUtteranceEnd = false
+                                    isBargeInTurnPending = false
+                                    isVoiceBargeInUtteranceActive = false
+                                    synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+                                    interruptedOutputSuppressionJob?.cancel()
+                                    interruptedOutputSuppressionJob = null
                                     consecutiveVoicedFrames = 0
                                     totalVoicedFramesInCurrentUtterance = 0
                                     synchronized(currentUtteranceAudioStream) { currentUtteranceAudioStream.reset() }
@@ -1685,6 +1995,7 @@ class JarvisConversationService : Service() {
                                 } else {
                                     if (!hasSignalledUtteranceEnd) {
                                         hasSignalledUtteranceEnd = true
+                                        isVoiceBargeInUtteranceActive = false
                                         // If screen capture is active, send one fresh snapshot right with the question
                                         if (com.jarvis.assistant.vision.ScreenCaptureManager.getInstance().isSharing.value) {
                                             val snapshot = com.jarvis.assistant.vision.ScreenCaptureManager.getInstance().captureSnapshotJpeg(60)
@@ -1693,6 +2004,9 @@ class JarvisConversationService : Service() {
                                             }
                                         }
                                     }
+                                    synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+                                    interruptedOutputSuppressionJob?.cancel()
+                                    interruptedOutputSuppressionJob = null
                                     setConversationState(ConversationState.THINKING)
                                     thinkingTimeoutJob?.cancel()
                                     thinkingTimeoutJob = serviceScope.launch {
@@ -1707,9 +2021,16 @@ class JarvisConversationService : Service() {
                                     }
                                 }
                             } else {
-                                // Short acoustic pop / ambient noise - return cleanly to IDLE
+                                // Short acoustic pop / ambient noise - return cleanly to IDLE and
+                                // release any interrupt gate because no usable utterance followed.
                                 hasSpeechInCurrentUtterance = false
                                 hasSignalledUtteranceEnd = false
+                                isBargeInTurnPending = false
+                                isVoiceBargeInUtteranceActive = false
+                                synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+                                interruptedOutputSuppressionJob?.cancel()
+                                interruptedOutputSuppressionJob = null
+                                synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
                                 setConversationState(ConversationState.IDLE)
                             }
                         }
@@ -1755,8 +2076,7 @@ class JarvisConversationService : Service() {
 
                 hasExecutedCommandInCurrentTurn = true
                 lastCommandExecutionTime = System.currentTimeMillis()
-                suppressAudioUntilTurnComplete = false
-
+        
                 val isAutomationTool = name in setOf(
                     "open_app", "open_website", "search_in_chrome",
                     "click_ui_element", "type_text", "scroll_screen", "press_key"
@@ -1785,7 +2105,7 @@ class JarvisConversationService : Service() {
                         flowPromptVerified = false
                         flowGenerationVerified = false
                         lastVerifiedFlowPrompt = ""
-                        val userText = currentTurnUserText.toString().trim()
+                        val userText = userTranscriptSnapshot().trim()
                         autonomousTaskGoal = if (userText.isNotEmpty()) userText else "Complete $name automation task"
                         com.jarvis.assistant.automation.agent.AgentTaskEngine.begin(autonomousTaskGoal, "gemini-live-tools")
                         bulkEndOfListVerified = false
@@ -2206,7 +2526,7 @@ class JarvisConversationService : Service() {
                     }
 
                     "go_to_background" -> {
-                        val userAskedForStandby = isExplicitStandbyCommand(currentTurnUserText.toString())
+                        val userAskedForStandby = isExplicitStandbyCommand(userTranscriptSnapshot())
                         if (!userAskedForStandby) {
                             result.put("success", false)
                             result.put("message", "REFUSED: The user's current request did not explicitly ask Jarvis to go to standby. Keep the conversation active and continue the requested task.")
@@ -2426,7 +2746,7 @@ class JarvisConversationService : Service() {
                                 result.put("system_directive", "SILENT EXECUTION: Do NOT speak or play audio. Task completed silently.")
                             } else {
                                 val alreadySpoke = synchronized(currentTurnAssistantText) {
-                                    currentTurnAssistantText.isNotBlank()
+                                    assistantTranscriptSnapshot().isNotBlank()
                                 }
                                 if (alreadySpoke) {
                                     result.put("system_directive", "TASK RECORDED: You already confirmed completion aloud to the user. Do NOT repeat yourself. Remain completely silent.")
@@ -3004,7 +3324,6 @@ class JarvisConversationService : Service() {
         }
         hasExecutedCommandInCurrentTurn = true
         lastCommandExecutionTime = System.currentTimeMillis()
-        suppressAudioUntilTurnComplete = false
         if (command is com.jarvis.assistant.automation.command.JarvisCommand.PlayYouTube) {
             audioPlayer?.flush()
         }
@@ -3040,10 +3359,10 @@ class JarvisConversationService : Service() {
         }
     }
 
-    private fun finalizeTurn() {
-        val rawReply = currentTurnAssistantText.toString().trim()
+    private fun finalizeTurn(preserveCaptionTail: Boolean = false) {
+        val rawReply = assistantTranscriptSnapshot().trim()
         val reply = rawReply.replace(Regex("\\s+"), " ")
-        val rawQuery = currentTurnUserText.toString().trim()
+        val rawQuery = userTranscriptSnapshot().trim()
         val query = rawQuery.replace(Regex("\\s+"), " ")
         val app = application as? JarvisApp
 
@@ -3064,10 +3383,25 @@ class JarvisConversationService : Service() {
                 )
             }
         }
-        currentTurnAssistantText.clear()
-        currentTurnUserText.clear()
+        clearAssistantTranscript()
+        clearUserTranscript()
         _liveUserTranscript.value = ""
-        _liveAssistantResponse.value = ""
+        liveAssistantResponseClearJob?.cancel()
+        liveAssistantResponseClearJob = null
+        if (preserveCaptionTail && reply.isNotBlank()) {
+            // The WebView needs a little time after the final PCM frame to display the last
+            // streamed words and dissolve the COMPLETE answer as dust. Immediate StateFlow
+            // clearing can overtake the final text update and leave nothing to animate.
+            liveAssistantResponseClearJob = serviceScope.launch {
+                delay(LIVE_CAPTION_TAIL_MS)
+                if (!_audioPlaybackActive.value && synchronized(currentTurnAssistantText) { assistantTranscriptSnapshot().isEmpty() }) {
+                    _liveAssistantResponse.value = ""
+                }
+                liveAssistantResponseClearJob = null
+            }
+        } else {
+            _liveAssistantResponse.value = ""
+        }
         hasSpeechInCurrentUtterance = false
         hasSignalledUtteranceEnd = false
         consecutiveVoicedFrames = 0
@@ -3085,17 +3419,32 @@ class JarvisConversationService : Service() {
     private fun stopActiveConversation() {
         inactivityJob?.cancel()
         inactivityJob = null
+        turnCompletionIdleJob?.cancel()
+        turnCompletionIdleJob = null
+        interruptedOutputSuppressionJob?.cancel()
+        interruptedOutputSuppressionJob = null
+        thinkingTimeoutJob?.cancel()
+        thinkingTimeoutJob = null
+        providerTurnComplete = true
+        synchronized(providerOutputGateLock) { suppressInterruptedProviderTurn = false }
+        handlingUserPlaybackInterrupt = false
+        userInterruptFinalizedByCallback = false
+        isBargeInTurnPending = false
+        isVoiceBargeInUtteranceActive = false
+        bargeInDetector.reset()
+        synchronized(bargeInAudioLock) { bargeInCandidateAudio.clear() }
         cancelAllActiveTools()
         com.jarvis.assistant.automation.agent.AgentTaskEngine.resetForSession()
         _isSessionOn.value = false
         finalizeTurn()
 
-
-        currentTurnAssistantText.clear()
-        currentTurnUserText.clear()
+        clearAssistantTranscript()
+        clearUserTranscript()
         preConnectAudioQueue.clear()
         hasSpeechInCurrentUtterance = false
         hasSignalledUtteranceEnd = false
+        synchronized(currentUtteranceAudioStream) { currentUtteranceAudioStream.reset() }
+        clearOwnerPendingAudio()
 
         audioRecorder?.stop()
         audioRecorder = null
@@ -3137,8 +3486,8 @@ class JarvisConversationService : Service() {
         com.jarvis.assistant.audio.JarvisSoundEffects.playStandbySound()
         isPendingBackgroundTransition = false
         stopActiveConversation()
-        currentTurnAssistantText.clear()
-        currentTurnUserText.clear()
+        clearAssistantTranscript()
+        clearUserTranscript()
         hasSpeechInCurrentUtterance = false
         hasSignalledUtteranceEnd = false
         _isStandby.value = true
@@ -3404,8 +3753,8 @@ class JarvisConversationService : Service() {
         vibrateBriefly()
         com.jarvis.assistant.audio.JarvisSoundEffects.playWakeSound()
         exitStandbyListening()
-        currentTurnAssistantText.clear()
-        currentTurnUserText.clear()
+        clearAssistantTranscript()
+        clearUserTranscript()
         hasSpeechInCurrentUtterance = false
         hasSignalledUtteranceEnd = false
         serviceScope.launch { _wakeEvents.emit(Unit) }

@@ -82,7 +82,7 @@
   const CSS = `:host{display:block;width:100%;position:relative;contain:layout paint;--cap:#fff;--cap-dim:rgba(255,255,255,.52)}
     .orb{position:relative;width:100%;aspect-ratio:1}
     canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-    .cap{position:relative;margin:-2% auto 0;width:var(--cap-w,98%);max-width:100%;min-height:2.4em;text-align:center;font:600 var(--cap-size,28px)/1.25 var(--cap-font,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif);letter-spacing:-.015em;color:var(--cap);text-wrap:balance;overflow-wrap:anywhere}
+    .cap{position:relative;margin:-2% auto 0;width:var(--cap-w,98%);max-width:100%;min-height:2.4em;text-align:center;font:500 var(--cap-size,28px)/1.34 var(--cap-font,"Noto Serif",Georgia,serif);letter-spacing:0;color:var(--cap);text-wrap:balance;overflow-wrap:anywhere}
     .cap.user{--cap:#ffd6a8;font-weight:500}
     .cap span{display:inline-block;white-space:pre;will-change:opacity,transform}
     canvas.fx{pointer-events:none}`;

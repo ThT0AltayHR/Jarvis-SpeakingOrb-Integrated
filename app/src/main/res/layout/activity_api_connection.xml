@@ -124,7 +124,7 @@
                     android:id="@+id/tvEndpointSummary"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="wss://generativelanguage.googleapis.com (Gemini 2.0 Live Protocol)"
+                    android:text="Official Gemini Live API • WebSocket transport"
                     android:textColor="?attr/themeTextMuted"
                     android:textSize="12sp"
                     android:fontFamily="sans-serif"
@@ -137,7 +137,7 @@
                     android:layout_height="40dp"
                     app:strokeColor="?attr/themeAccent"
                     app:strokeWidth="1dp"
-                    android:text="Test Connection &amp; Latency"
+                    android:text="Check API Key &amp; Network"
                     android:textColor="?attr/themeAccent"
                     android:textSize="12sp"
                     android:textAllCaps="false"
@@ -267,107 +267,14 @@
                     android:id="@+id/rbModelFlashThinking"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="gemini-3.1-flash (Ultra-Low Latency Live • ~700ms Recommended)"
-                    android:textColor="?attr/themeTextPrimary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif-medium"
-                    android:paddingTop="8dp"
-                    android:paddingBottom="8dp" />
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="?attr/themeCardBorder" />
-
-                <RadioButton
-                    android:id="@+id/rbModelFlash20"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="gemini-3.8-live (Flagship Conversational Intelligence)"
-                    android:textColor="?attr/themeTextPrimary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif-medium"
-                    android:paddingTop="8dp"
-                    android:paddingBottom="8dp" />
-
-
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="?attr/themeCardBorder" />
-
-                <RadioButton
-                    android:id="@+id/rbModelFlash15"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="gemini-3.1-flash (Balanced Multi-Model Autonomous Agent)"
+                    android:checked="true"
+                    android:text="Gemini 3.8 Live (Stable • Recommended for real-time voice)"
                     android:textColor="?attr/themeTextPrimary"
                     android:textSize="13sp"
                     android:fontFamily="sans-serif-medium"
                     android:paddingTop="8dp"
                     android:paddingBottom="8dp" />
             </RadioGroup>
-
-            <!-- Card 4: Custom WebSocket Endpoint -->
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Custom Endpoint (Optional)"
-                android:textColor="?attr/themeTextMuted"
-                android:textSize="13sp"
-                android:fontFamily="sans-serif-medium"
-                android:textStyle="bold"
-                android:layout_marginBottom="8dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:background="@drawable/bg_jarvis_card"
-                android:padding="18dp"
-                android:layout_marginBottom="24dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Custom Gateway URL"
-                    android:textColor="?attr/themeTextPrimary"
-                    android:textSize="15sp"
-                    android:fontFamily="sans-serif-medium"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Override standard Google endpoint with your proxy or relay (leave empty for default)"
-                    android:textColor="?attr/themeTextMuted"
-                    android:textSize="12sp"
-                    android:fontFamily="sans-serif"
-                    android:layout_marginTop="2dp" />
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    app:boxBackgroundMode="outline"
-                    app:boxCornerRadiusTopStart="12dp"
-                    app:boxCornerRadiusTopEnd="12dp"
-                    app:boxCornerRadiusBottomStart="12dp"
-                    app:boxCornerRadiusBottomEnd="12dp"
-                    app:boxStrokeColor="?attr/themeAccent">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/etCustomEndpoint"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:hint="wss://your-gateway.com/live"
-                        android:inputType="textUri"
-                        android:textColor="?attr/themeTextPrimary"
-                        android:textSize="14sp"
-                        android:fontFamily="sans-serif" />
-                </com.google.android.material.textfield.TextInputLayout>
-            </LinearLayout>
 
         </LinearLayout>
     </ScrollView>

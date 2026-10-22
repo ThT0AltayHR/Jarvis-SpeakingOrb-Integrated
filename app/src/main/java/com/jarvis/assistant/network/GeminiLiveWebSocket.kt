@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicInteger
 
 class GeminiLiveWebSocket(
     private val apiKey: String,
@@ -43,11 +44,10 @@ class GeminiLiveWebSocket(
 
     private val client = sharedClient
 
-    private var activeModel: String = when (model) {
-        GeminiConstants.MODEL_3_8_LIVE -> GeminiConstants.MODEL_3_8_LIVE
-        GeminiConstants.MODEL_3_1_FLASH_AGENT -> GeminiConstants.MODEL_3_1_FLASH
-        else -> if (model.isNotBlank() && !model.contains("2.5")) model else GeminiConstants.DEFAULT_MODEL
-    }
+    // Be strict: sending unsupported preview/placeholder IDs makes setup fail before
+    // the assistant can speak or emit live transcription.
+    private var activeModel: String = model.takeIf { it in GeminiConstants.SUPPORTED_MODELS }
+        ?: GeminiConstants.DEFAULT_MODEL
 
     private var webSocket: WebSocket? = null
     private val isConnected = AtomicBoolean(false)
@@ -55,8 +55,16 @@ class GeminiLiveWebSocket(
     private val isManuallyStopped = AtomicBoolean(false)
     private var coroutineScope: CoroutineScope? = null
 
+    // Audio transcription and modelTurn text may arrive as separate WebSocket messages with
+    // no ordering guarantee. Buffer modelTurn text as a fallback and prefer outputTranscription
+    // for the visible live caption whenever the configured transcription stream is available.
+    private val transcriptStateLock = Any()
+    private var outputTranscriptionReceivedThisTurn = false
+    private val fallbackAssistantTranscript = StringBuilder()
+
     private var sessionRenewalJob: Job? = null
     private var reconnectJob: Job? = null
+    private val reconnectAttempts = AtomicInteger(0)
     var promptProvider: (() -> String)? = null
 
     fun isSessionReady(): Boolean = isConnected.get() && isSetupComplete.get()
@@ -86,6 +94,10 @@ class GeminiLiveWebSocket(
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.d(TAG, "WebSocket connected to Gemini Live. Sending BidiSetup...")
+                    synchronized(transcriptStateLock) {
+                        outputTranscriptionReceivedThisTurn = false
+                        fallbackAssistantTranscript.setLength(0)
+                    }
                     isConnected.set(true)
                     isSetupComplete.set(false)
                     listener.onConnectionStateChanged("CONFIGURING...")
@@ -112,40 +124,40 @@ class GeminiLiveWebSocket(
                     isSetupComplete.set(false)
                     stopTimers()
 
-                    val isApiKeyError = reason.contains("API_KEY_INVALID", ignoreCase = true) ||
-                                       reason.contains("API key not valid", ignoreCase = true) ||
-                                       reason.contains("API key", ignoreCase = true) ||
-                                       reason.contains("key invalid", ignoreCase = true)
-                    if (isApiKeyError) {
-                        Log.e(TAG, "Gemini rejected session due to invalid API key (code=$code, reason=$reason)")
-                        listener.onError("Invalid API Key: Google rejected the key. Please verify your Gemini API key in Settings.", isFatal = true, errorCode = "API_KEY_INVALID")
-                        listener.onConnectionStateChanged("ERROR • INVALID KEY")
-                        return
-                    }
-
-                    val isQuotaError = reason.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
-                                       reason.contains("quota", ignoreCase = true)
-                    if (isQuotaError) {
-                        Log.w(TAG, "Gemini rate-limited or connection collision (code=$code, reason=$reason). Retrying in cooldown...")
-                        listener.onConnectionStateChanged("COOLDOWN • RETRYING")
-                        scheduleReconnect()
-                        return
+                    // A WebSocket close reason is not an HTTP status. Use the shared classifier
+                    // rather than treating any reason containing “API key” as proof of an invalid
+                    // credential; servers also mention credentials while explaining unrelated
+                    // setup failures.
+                    when (GeminiLiveErrorPolicy.classify(0, reason)) {
+                        GeminiLiveErrorPolicy.Category.INVALID_API_KEY -> {
+                            Log.e(TAG, "Gemini rejected the session for an explicitly invalid API key (code=$code, reason=$reason)")
+                            listener.onError("Invalid Gemini API key: Google explicitly rejected the key. Verify it in Settings.", isFatal = true, errorCode = "API_KEY_INVALID")
+                            listener.onConnectionStateChanged("ERROR • INVALID KEY")
+                            return
+                        }
+                        GeminiLiveErrorPolicy.Category.AUTHENTICATION,
+                        GeminiLiveErrorPolicy.Category.ACCESS_DENIED -> {
+                            listener.onError("Gemini authentication or project access was denied (close code $code): $reason", isFatal = true, errorCode = "API_ACCESS_DENIED")
+                            listener.onConnectionStateChanged("ERROR • ACCESS DENIED")
+                            return
+                        }
+                        GeminiLiveErrorPolicy.Category.QUOTA -> {
+                            Log.w(TAG, "Gemini rate-limited (code=$code, reason=$reason). Retrying after cooldown...")
+                            listener.onConnectionStateChanged("COOLDOWN • RETRYING")
+                            if (!isManuallyStopped.get()) scheduleReconnect(minimumDelayMs = 30_000L)
+                            return
+                        }
+                        else -> Unit
                     }
 
                     if (code == 1008) {
-                        val isModelError = reason.contains("BidiGenerateContent", ignoreCase = true) ||
-                                           reason.contains("not found", ignoreCase = true) ||
-                                           reason.contains("not supported", ignoreCase = true)
-                        if (isModelError) {
-                            if (activeModel != GeminiConstants.MODEL_3_8_LIVE) {
-                                Log.w(TAG, "Model $activeModel rejected by Gemini ($reason). Auto-falling back to ${GeminiConstants.MODEL_3_8_LIVE}")
-                                activeModel = GeminiConstants.MODEL_3_8_LIVE
-                                listener.onConnectionStateChanged("RECONNECTING...")
-                                scheduleReconnect()
-                                return
-                            }
-                        }
-                        listener.onError("Gemini setup was rejected: $reason", isFatal = true, errorCode = "SETUP_REJECTED")
+                        val isModelOrRequestError = GeminiLiveErrorPolicy.classify(0, reason) == GeminiLiveErrorPolicy.Category.INVALID_REQUEST ||
+                            reason.contains("BidiGenerateContent", ignoreCase = true) ||
+                            reason.contains("not found", ignoreCase = true) ||
+                            reason.contains("not supported", ignoreCase = true)
+                        val errorCode = if (isModelOrRequestError) "LIVE_REQUEST_INVALID" else "SETUP_REJECTED"
+                        Log.e(TAG, "Gemini closed with policy/setup rejection ($errorCode): $reason")
+                        listener.onError("Gemini rejected the Live session configuration (close code $code): $reason", isFatal = true, errorCode = errorCode)
                         listener.onConnectionStateChanged("OFFLINE")
                     } else if (!isManuallyStopped.get()) {
                         listener.onConnectionStateChanged("RECONNECTING...")
@@ -164,38 +176,36 @@ class GeminiLiveWebSocket(
                     isSetupComplete.set(false)
                     stopTimers()
 
-                    val isApiKeyError = code == 400 || code == 401 || code == 403 ||
-                            errorMsg.contains("400") || errorMsg.contains("403") || errorMsg.contains("401") ||
-                            errorMsg.contains("API_KEY_INVALID", ignoreCase = true) ||
-                            errorMsg.contains("API key not valid", ignoreCase = true) ||
-                            (responseBody?.contains("API_KEY_INVALID", ignoreCase = true) == true) ||
-                            (responseBody?.contains("API key not valid", ignoreCase = true) == true)
-
-                    val isQuotaError = code == 429 ||
-                            errorMsg.contains("429") ||
-                            errorMsg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
-                            errorMsg.contains("quota", ignoreCase = true) ||
-                            (responseBody?.contains("RESOURCE_EXHAUSTED", ignoreCase = true) == true)
-
-                    if (isApiKeyError) {
-                        Log.e(TAG, "Fatal failure: Invalid API Key (HTTP $code: $errorMsg)")
-                        listener.onError("Invalid API Key: Google rejected the key. Please verify your Gemini API key in Settings.", isFatal = true, errorCode = "API_KEY_INVALID")
-                        listener.onConnectionStateChanged("ERROR • INVALID KEY")
-                        return
-                    }
-
-                    if (isQuotaError) {
-                        Log.w(TAG, "Quota / rate limit hit (HTTP $code: $errorMsg). Retrying in cooldown...")
-                        listener.onConnectionStateChanged("COOLDOWN • RETRYING")
-                        scheduleReconnect()
-                        return
-                    }
-
-                    if (!isManuallyStopped.get()) {
-                        listener.onError("Connection lost: $errorMsg. Retrying...", isFatal = false, errorCode = "CONNECTION_ERROR")
-                        scheduleReconnect()
-                    } else {
-                        listener.onConnectionStateChanged("OFFLINE")
+                    val category = GeminiLiveErrorPolicy.classify(code, "$errorMsg ${responseBody.orEmpty()}")
+                    when (category) {
+                        GeminiLiveErrorPolicy.Category.INVALID_API_KEY -> {
+                            Log.e(TAG, "Fatal failure: Invalid Gemini API key (HTTP $code: $errorMsg)")
+                            listener.onError("Invalid Gemini API key: Google rejected the key. Verify the key in Settings.", isFatal = true, errorCode = "API_KEY_INVALID")
+                            listener.onConnectionStateChanged("ERROR • INVALID KEY")
+                        }
+                        GeminiLiveErrorPolicy.Category.AUTHENTICATION,
+                        GeminiLiveErrorPolicy.Category.ACCESS_DENIED -> {
+                            listener.onError("Gemini authentication or project access was denied (HTTP $code): $errorMsg", isFatal = true, errorCode = "API_ACCESS_DENIED")
+                            listener.onConnectionStateChanged("ERROR • ACCESS DENIED")
+                        }
+                        GeminiLiveErrorPolicy.Category.QUOTA -> {
+                            Log.w(TAG, "Quota/rate limit hit (HTTP $code: $errorMsg). Retrying after cooldown.")
+                            listener.onConnectionStateChanged("COOLDOWN • RETRYING")
+                            scheduleReconnect(minimumDelayMs = 30_000L)
+                        }
+                        GeminiLiveErrorPolicy.Category.INVALID_REQUEST -> {
+                            Log.e(TAG, "Gemini rejected the Live request/setup (HTTP $code: $errorMsg; body=$responseBody)")
+                            listener.onError("Gemini rejected the Live model or session configuration (HTTP $code): ${responseBody ?: errorMsg}", isFatal = true, errorCode = "LIVE_REQUEST_INVALID")
+                            listener.onConnectionStateChanged("ERROR • INVALID REQUEST")
+                        }
+                        GeminiLiveErrorPolicy.Category.TRANSIENT -> {
+                            if (!isManuallyStopped.get()) {
+                                listener.onError("Connection lost: $errorMsg. Retrying with backoff...", isFatal = false, errorCode = "CONNECTION_ERROR")
+                                scheduleReconnect()
+                            } else {
+                                listener.onConnectionStateChanged("OFFLINE")
+                            }
+                        }
                     }
                 }
             })
@@ -211,33 +221,31 @@ class GeminiLiveWebSocket(
         val setup = JSONObject().apply {
             put("setup", JSONObject().apply {
                 put("model", activeModel)
-                put("system_instruction", JSONObject().apply {
+                put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().put(JSONObject().put("text", effectivePrompt)))
                 })
-                put("generation_config", JSONObject().apply {
-                    put("response_modalities", JSONArray().put("AUDIO"))
-                    put("speech_config", JSONObject().apply {
-                        put("voice_config", JSONObject().apply {
-                            put("prebuilt_voice_config", JSONObject().apply {
-                                put("voice_name", voiceName)
+                put("generationConfig", JSONObject().apply {
+                    put("responseModalities", JSONArray().put("AUDIO"))
+                    put("speechConfig", JSONObject().apply {
+                        put("voiceConfig", JSONObject().apply {
+                            put("prebuiltVoiceConfig", JSONObject().apply {
+                                put("voiceName", voiceName)
                             })
                         })
                     })
                     put("temperature", 0.6)
-                    // Gemini 2.5 Flash native audio has thinking enabled by default (budget=2048),
-                    // which causes a 2-3 second delay before generating speech.
-                    // Setting thinking_budget to 0 disables chain-of-thought, yielding instant (<1s) conversational response.
-                    if (activeModel.contains("2.5")) {
-                        put("thinking_config", JSONObject().apply {
-                            put("thinking_budget", 0)
-                        })
-                    }
                 })
+                // Output transcription drives the live caption/dust animation. Input
+                // transcription powers the visible user transcript and voice-command checks.
+                // These are top-level BidiGenerateContentSetup fields, not generationConfig.
+                put("inputAudioTranscription", JSONObject())
+                put("outputAudioTranscription", JSONObject())
                 put("tools", JSONArray().put(JSONObject().apply {
                     put("functionDeclarations", JSONArray().apply {
                         // 1. open_app
                         put(JSONObject().apply {
                             put("name", "open_app")
+                            put("behavior", "BLOCKING")
                             put("description", "Opens an app installed on the user's phone, e.g. YouTube, WhatsApp, Camera, Settings. If multiple instances exist, app_number specifies 1 or 2.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -258,6 +266,7 @@ class GeminiLiveWebSocket(
                         // 2. open_website
                         put(JSONObject().apply {
                             put("name", "open_website")
+                            put("behavior", "BLOCKING")
                             put("description", "Opens one or more websites/URLs in Google Chrome in separate tabs. Use whenever the user asks to open a website, visit a URL, or open multiple websites/URLs in different tabs (e.g. \"open github.com and names21st.dev in different tabs\", \"open website google.com\", \"open vercel.com\").")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -278,6 +287,7 @@ class GeminiLiveWebSocket(
                         // 3. search_in_chrome
                         put(JSONObject().apply {
                             put("name", "search_in_chrome")
+                            put("behavior", "BLOCKING")
                             put("description", "Opens Google Chrome and searches for a topic/question, or opens a website URL in a tab (e.g. \"search xyz in Chrome\", \"google xyz\").")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -294,6 +304,7 @@ class GeminiLiveWebSocket(
                         // 4. search_and_play_youtube
                         put(JSONObject().apply {
                             put("name", "search_and_play_youtube")
+                            put("behavior", "BLOCKING")
                             put("description", "Searches YouTube and IMMEDIATELY OPENS AND PLAYS the requested video or song. Use whenever the user directly commands you to PLAY a video or song (e.g. \"play Tum Hi Ho\", \"play Believer on YouTube\", \"play XYZ song or youtube\", \"YouTube pe Arijit Singh chalao\", \"Jarvis video play karo\"). CRITICAL RULE: If the user says 'play', ALWAYS use search_and_play_youtube, NEVER use search_youtube. STRICT PROHIBITION: NEVER use this tool when the user is casually conversing or humming without an explicit play command.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -310,6 +321,7 @@ class GeminiLiveWebSocket(
                         // 5. search_youtube
                         put(JSONObject().apply {
                             put("name", "search_youtube")
+                            put("behavior", "BLOCKING")
                             put("description", "Opens YouTube and searches for a topic/query, displaying the SEARCH RESULTS SCREEN ONLY WITHOUT auto-playing or tapping any video. Use ONLY when the user explicitly asks to SEARCH on YouTube without asking to play (e.g. \"search this on YouTube\", \"YouTube pe search karo xyz\", \"search Python tutorial on YouTube\"). NEVER use this tool when the user says to play a video or song.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -326,6 +338,7 @@ class GeminiLiveWebSocket(
                         // 6. youtube_accessibility_action
                         put(JSONObject().apply {
                             put("name", "youtube_accessibility_action")
+                            put("behavior", "BLOCKING")
                             put("description", "Performs an in-app YouTube action using accessibility: skipping an ad ('skip_ad'), liking the video ('like'), subscribing to the channel ('subscribe'), opening the channel ('open_channel'), or toggling fullscreen ('fullscreen').")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -344,6 +357,7 @@ class GeminiLiveWebSocket(
                         // 7. media_playback_control
                         put(JSONObject().apply {
                             put("name", "media_playback_control")
+                            put("behavior", "BLOCKING")
                             put("description", "Controls whatever video/audio is currently playing (e.g. YouTube): play, pause, next, previous, stop.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -362,6 +376,7 @@ class GeminiLiveWebSocket(
                         // 8. send_whatsapp_message
                         put(JSONObject().apply {
                             put("name", "send_whatsapp_message")
+                            put("behavior", "BLOCKING")
                             put("description", "Opens WhatsApp and queues sending a text to a named contact (e.g. \"message Rahul that I will be late\"). The tool response distinguishes opening/queuing from a verified send; inspect the current chat before claiming the message was sent. If 2 WhatsApp apps exist and app_number is not specified, ask the user which one.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -390,6 +405,7 @@ class GeminiLiveWebSocket(
                         // 9. whatsapp_call
                         put(JSONObject().apply {
                             put("name", "whatsapp_call")
+                            put("behavior", "BLOCKING")
                             put("description", "Initiates a WhatsApp voice call or WhatsApp video call to a contact (e.g. \"WhatsApp call Mom\", \"WhatsApp video call Rahul\").")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -418,6 +434,7 @@ class GeminiLiveWebSocket(
                         // 10. call_contact
                         put(JSONObject().apply {
                             put("name", "call_contact")
+                            put("behavior", "BLOCKING")
                             put("description", "Places a standard phone call to a saved contact by spoken name, e.g. \"call mom\", \"call Rahul\", \"phone Dad\".")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -434,6 +451,7 @@ class GeminiLiveWebSocket(
                         // 11. set_volume
                         put(JSONObject().apply {
                             put("name", "set_volume")
+                            put("behavior", "BLOCKING")
                             put("description", "Adjusts media volume on device. Supports relative commands ('increase', 'decrease') or exact level ('set').")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -454,6 +472,7 @@ class GeminiLiveWebSocket(
                         // 12. set_brightness
                         put(JSONObject().apply {
                             put("name", "set_brightness")
+                            put("behavior", "BLOCKING")
                             put("description", "Adjusts screen brightness on device. Supports relative commands ('increase', 'decrease') or exact level ('set').")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -474,6 +493,7 @@ class GeminiLiveWebSocket(
                         // 13. builtin_chrome_search
                         put(JSONObject().apply {
                             put("name", "builtin_chrome_search")
+                            put("behavior", "BLOCKING")
                             put("description", "Performs invisible, background web research using JARVIS's built-in Chrome engine. Use whenever the user asks a question, topic, real-time factual query, news, weather, or live information that you don't know off-hand.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -490,6 +510,7 @@ class GeminiLiveWebSocket(
                         // 14. go_to_background
                         put(JSONObject().apply {
                             put("name", "go_to_background")
+                            put("behavior", "BLOCKING")
                             put("description", "Sends JARVIS to the background, minimizes the app to the home screen, and enters standby wake-word listening. Use immediately whenever user says 'go to background', 'go background', 'minimize', 'close', 'background me jao', 'go to home screen', 'go to sleep', or 'enter standby'.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -500,6 +521,7 @@ class GeminiLiveWebSocket(
                         // 15. set_flashlight
                         put(JSONObject().apply {
                             put("name", "set_flashlight")
+                            put("behavior", "BLOCKING")
                             put("description", "Turns the phone's torch or flashlight on or off. ALWAYS call this tool unconditionally whenever the user commands to turn on, enable, turn off, or disable the torch/flashlight (e.g. \"turn on flash lite\", \"turn on flashlight\", \"turn off flashlight\", \"torch on\", \"torch off\", \"torch chalu karo\", \"torch band karo\"). NEVER claim it is already on or off without calling this tool.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -516,6 +538,7 @@ class GeminiLiveWebSocket(
                         // 16. click_ui_element
                         put(JSONObject().apply {
                             put("name", "click_ui_element")
+                            put("behavior", "BLOCKING")
                             put("description", "Clicks or toggles a specific UI button, switch, link, icon, tab, or element. Prefer a unique current element_id or target_name. When Screen Share is active, normalized coordinates x/y (0-1000) may be used for a clearly visible unlabeled target; the tool checks the hit target and returns whether a screen change was verified. Never treat a dispatched gesture alone as proof of success.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -552,6 +575,7 @@ class GeminiLiveWebSocket(
                         // 17. type_text
                         put(JSONObject().apply {
                             put("name", "type_text")
+                            put("behavior", "BLOCKING")
                             put("description", "Types text into a grounded input field. The result is successful only when the text is read back from the target; a clipboard paste or dispatched gesture alone is not proof. For Google Flow, use the named prompt field or, only with a confirmed live Screen Share frame, current normalized x/y coordinates of the visible prompt box. Never report text entered unless success=true and verified=true.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -584,6 +608,7 @@ class GeminiLiveWebSocket(
                         // 18. scroll_screen
                         put(JSONObject().apply {
                             put("name", "scroll_screen")
+                            put("behavior", "BLOCKING")
                             put("description", "Scrolls the active screen in a given direction to reveal elements that are offscreen. Supports gentle line-by-line scrolling for inspecting photos and lists.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -604,6 +629,7 @@ class GeminiLiveWebSocket(
                         // 19. press_key
                         put(JSONObject().apply {
                             put("name", "press_key")
+                            put("behavior", "BLOCKING")
                             put("description", "Executes system-level navigation gestures: 'back', 'home', or 'recents'.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -620,6 +646,7 @@ class GeminiLiveWebSocket(
                         // 20. task_completed
                         put(JSONObject().apply {
                             put("name", "task_completed")
+                            put("behavior", "BLOCKING")
                             put("description", "Call this tool only after the user's requested task is visibly confirmed complete. Do not call it right after typing into a search bar; when searching for a chat or file, first open the matching result and verify the resulting screen.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -636,6 +663,7 @@ class GeminiLiveWebSocket(
                         // 21. inspect_screen
                         put(JSONObject().apply {
                             put("name", "inspect_screen")
+                            put("behavior", "BLOCKING")
                             put("description", "Reads the foreground app, screen title, and accessible UI elements (text, buttons, tabs). This tool returns accessibility text, not a visual image. Only claim live visual access when Screen Share is confirmed active and a recent captured frame has been received. Call when you need current accessible labels or element IDs before interacting, or when the user asks about screen content. Do not use for normal conversation.")
                             put("parameters", JSONObject().apply {
                                 put("type", "OBJECT")
@@ -663,20 +691,50 @@ class GeminiLiveWebSocket(
                 val errMsg = errObj?.optString("message", "") ?: json.optString("error", "Unknown error")
                 val errCode = errObj?.optInt("code", 0) ?: 0
                 Log.e(TAG, "Server returned error: code=$errCode, message=$errMsg")
-                val isApiKey = errMsg.contains("API_KEY_INVALID", ignoreCase = true) ||
-                               errMsg.contains("API key not valid", ignoreCase = true) ||
-                               errCode == 400 || errCode == 403
-                val isQuota = errMsg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
-                              errMsg.contains("quota", ignoreCase = true) ||
-                              errCode == 429
-                if (isApiKey) {
-                    listener.onError("Invalid API Key: $errMsg", isFatal = true, errorCode = "API_KEY_INVALID")
-                    listener.onConnectionStateChanged("ERROR • INVALID KEY")
-                } else if (isQuota) {
-                    listener.onError("API Quota Exceeded: $errMsg", isFatal = true, errorCode = "QUOTA_EXCEEDED")
-                    listener.onConnectionStateChanged("ERROR • QUOTA EXCEEDED")
-                } else {
-                    listener.onError("Gemini Error ($errCode): $errMsg", isFatal = false)
+                when (GeminiLiveErrorPolicy.classify(errCode, errMsg)) {
+                    GeminiLiveErrorPolicy.Category.INVALID_API_KEY -> {
+                        isConnected.set(false)
+                        isSetupComplete.set(false)
+                        isManuallyStopped.set(true) // Fatal until the user fixes credentials and reconnects.
+                        listener.onError("Invalid Gemini API key: $errMsg", isFatal = true, errorCode = "API_KEY_INVALID")
+                        listener.onConnectionStateChanged("ERROR • INVALID KEY")
+                        webSocket?.close(1000, "Terminal credential error")
+                    }
+                    GeminiLiveErrorPolicy.Category.AUTHENTICATION,
+                    GeminiLiveErrorPolicy.Category.ACCESS_DENIED -> {
+                        isConnected.set(false)
+                        isSetupComplete.set(false)
+                        isManuallyStopped.set(true)
+                        listener.onError("Gemini authentication or project access was denied: $errMsg", isFatal = true, errorCode = "API_ACCESS_DENIED")
+                        listener.onConnectionStateChanged("ERROR • ACCESS DENIED")
+                        webSocket?.close(1000, "Terminal access error")
+                    }
+                    GeminiLiveErrorPolicy.Category.QUOTA -> {
+                        isConnected.set(false)
+                        isSetupComplete.set(false)
+                        listener.onError("Gemini quota/rate limit reached: $errMsg. The connection will retry after a cooldown.", isFatal = false, errorCode = "QUOTA_EXCEEDED")
+                        listener.onConnectionStateChanged("COOLDOWN • RETRYING")
+                        // Let onClosed apply the same 30-second quota cooldown. Closing prevents
+                        // a half-open socket from appearing live while all of its requests fail.
+                        webSocket?.close(1000, "RESOURCE_EXHAUSTED")
+                    }
+                    GeminiLiveErrorPolicy.Category.INVALID_REQUEST -> {
+                        isConnected.set(false)
+                        isSetupComplete.set(false)
+                        isManuallyStopped.set(true)
+                        listener.onError("Gemini rejected the Live request or session setup (API code $errCode): $errMsg", isFatal = true, errorCode = "LIVE_REQUEST_INVALID")
+                        listener.onConnectionStateChanged("ERROR • INVALID REQUEST")
+                        webSocket?.close(1000, "Terminal request error")
+                    }
+                    GeminiLiveErrorPolicy.Category.TRANSIENT -> {
+                        isConnected.set(false)
+                        isSetupComplete.set(false)
+                        listener.onError("Gemini Error ($errCode): $errMsg. Reconnecting...", isFatal = false, errorCode = "GEMINI_ERROR")
+                        listener.onConnectionStateChanged("RECONNECTING...")
+                        // The close callback owns retry scheduling so an error event cannot create
+                        // two competing exponential-backoff jobs for the same failed socket.
+                        webSocket?.close(1000, "Retryable Gemini server error")
+                    }
                 }
                 return
             }
@@ -685,17 +743,19 @@ class GeminiLiveWebSocket(
             if (json.has("setupComplete")) {
                 Log.i(TAG, "Server acknowledged setup: setupComplete received. Session is now LIVE!")
                 if (!isSetupComplete.getAndSet(true)) {
+                    reconnectAttempts.set(0)
                     listener.onConnectionStateChanged("LIVE")
                     startSessionRenewal()
                 }
                 return
             }
 
-            // Ensure session is marked ready if server sends content before explicit setupComplete
-            if (!isSetupComplete.get() && (json.has("serverContent") || json.has("toolCall"))) {
-                isSetupComplete.set(true)
-                listener.onConnectionStateChanged("LIVE")
-                startSessionRenewal()
+            // A Live session is usable only after the authoritative setupComplete handshake.
+            // Treating arbitrary content as readiness creates a false-LIVE state and can let the
+            // recorder start sending audio before setup/model/auth errors are resolved.
+            if (!isSetupComplete.get()) {
+                Log.w(TAG, "Ignoring non-error server payload received before setupComplete handshake")
+                return
             }
 
             // 1. Top-level toolCall
@@ -756,8 +816,21 @@ class GeminiLiveWebSocket(
                     }
                 }
 
-                var hasOutputTranscriptionText = false
-                val outputTrans = serverContent.optJSONObject("outputTranscription")
+                // Interruption must be processed before this frame can update assistant captions.
+                // Some Live API frames contain both `interrupted` and trailing transcription/audio.
+                // Keep input transcription above (the user's barge-in words are useful), but drop
+                // every assistant-output field from the interrupted frame as one atomic boundary.
+                val wasInterrupted = serverContent.optBoolean("interrupted", false)
+                if (wasInterrupted) {
+                    Log.d(TAG, "Server signaled turn interrupted; dropping trailing assistant output from this frame")
+                    listener.onInterrupted()
+                    synchronized(transcriptStateLock) {
+                        fallbackAssistantTranscript.setLength(0)
+                        outputTranscriptionReceivedThisTurn = false
+                    }
+                }
+
+                val outputTrans = if (wasInterrupted) null else serverContent.optJSONObject("outputTranscription")
                 if (outputTrans != null) {
                     var outText = outputTrans.optString("text", "")
                     if (outText.isEmpty()) {
@@ -772,17 +845,16 @@ class GeminiLiveWebSocket(
                         }
                     }
                     if (outText.isNotEmpty()) {
-                        hasOutputTranscriptionText = true
+                        synchronized(transcriptStateLock) {
+                            outputTranscriptionReceivedThisTurn = true
+                        }
                         listener.onAssistantTextReceived(outText)
                     }
                 }
 
-                if (serverContent.optBoolean("interrupted", false)) {
-                    Log.d(TAG, "Server signaled turn interrupted")
-                    listener.onInterrupted()
-                }
-
-                val modelTurn = serverContent.optJSONObject("modelTurn")
+                // `wasInterrupted` was handled before output transcription above. Use it here
+                // too so trailing model audio/text can never be queued after the flush.
+                val modelTurn = if (GeminiTurnCompletionPolicy.shouldProcessModelTurn(wasInterrupted)) serverContent.optJSONObject("modelTurn") else null
                 if (modelTurn != null) {
                     val parts = modelTurn.optJSONArray("parts")
                     if (parts != null) {
@@ -803,16 +875,25 @@ class GeminiLiveWebSocket(
                                     text.contains("inquire", ignoreCase = true) ||
                                     text.contains("greeting", ignoreCase = true)
                             )
-                            if (text.isNotEmpty() && !isThinkingLeak && !hasOutputTranscriptionText) {
-                                listener.onAssistantTextReceived(text)
+                            if (text.isNotEmpty() && !isThinkingLeak) {
+                                synchronized(transcriptStateLock) {
+                                    // Never stream modelTurn text directly: if outputTranscription
+                                    // arrives in a later frame, a local per-frame boolean can no
+                                    // longer prevent the same spoken words being appended twice.
+                                    // Use modelTurn text only at turnComplete if no audio transcript
+                                    // was received for this turn.
+                                    if (!outputTranscriptionReceivedThisTurn) {
+                                        fallbackAssistantTranscript.append(text)
+                                    }
+                                }
                             }
 
                             val inlineData = part.optJSONObject("inlineData")
                             if (inlineData != null) {
                                 val base64Data = inlineData.optString("data", "")
-                                if (base64Data.length > 8) {
+                                if (base64Data.isNotEmpty()) {
                                     val pcmBytes = Base64.decode(base64Data, Base64.DEFAULT)
-                                    if (pcmBytes.size >= 16) {
+                                    if (pcmBytes.size >= 2) {
                                         val validLen = pcmBytes.size and 1.inv()
                                         val aligned = if (validLen == pcmBytes.size) pcmBytes else pcmBytes.copyOf(validLen)
                                         listener.onAudioDataReceived(aligned)
@@ -823,11 +904,26 @@ class GeminiLiveWebSocket(
                     }
                 }
 
-                val isTurnDone = serverContent.optBoolean("turnComplete", false) ||
-                                 serverContent.optBoolean("generationComplete", false) ||
-                                 serverContent.optBoolean("endOfTurn", false)
+                val generationDone = serverContent.optBoolean("generationComplete", false)
+                if (generationDone) {
+                    // Gemini can emit generationComplete before turnComplete, while the
+                    // playback/turn lifecycle is still pending. Do not finish AudioPlayer or
+                    // reset service state from this signal alone.
+                    Log.d(TAG, "Gemini generation complete; waiting for final turnComplete")
+                }
+                val isTurnDone = GeminiTurnCompletionPolicy.isTurnComplete(
+                    turnComplete = serverContent.optBoolean("turnComplete", false),
+                    endOfTurn = serverContent.optBoolean("endOfTurn", false)
+                )
                 if (isTurnDone) {
-                    Log.d(TAG, "Server signaled turnComplete/generationComplete")
+                    val fallbackText = synchronized(transcriptStateLock) {
+                        val text = if (!outputTranscriptionReceivedThisTurn) fallbackAssistantTranscript.toString() else ""
+                        fallbackAssistantTranscript.setLength(0)
+                        outputTranscriptionReceivedThisTurn = false
+                        text
+                    }
+                    if (fallbackText.isNotBlank()) listener.onAssistantTextReceived(fallbackText)
+                    Log.d(TAG, "Server signaled final turnComplete")
                     listener.onTurnCompleted()
                 }
             }
@@ -839,8 +935,8 @@ class GeminiLiveWebSocket(
     fun sendToolResponse(callId: String, functionName: String, result: JSONObject) {
         try {
             val msg = JSONObject().apply {
-                put("tool_response", JSONObject().apply {
-                    put("function_responses", JSONArray().put(JSONObject().apply {
+                put("toolResponse", JSONObject().apply {
+                    put("functionResponses", JSONArray().put(JSONObject().apply {
                         put("id", callId)
                         put("name", functionName)
                         put("response", result)
@@ -848,7 +944,7 @@ class GeminiLiveWebSocket(
                 })
             }
             webSocket?.send(msg.toString())
-            Log.d(TAG, "Sent tool_response for $functionName: $result")
+            Log.d(TAG, "Sent toolResponse for $functionName: $result")
         } catch (e: Exception) {
             Log.e(TAG, "sendToolResponse failed: ${e.message}", e)
         }
@@ -900,7 +996,15 @@ class GeminiLiveWebSocket(
      * natively via server-side neural VAD. Sending empty client_content cancels active generation.
      */
     fun sendAudioStreamEnd() {
-        // No-op: server-side VAD handles turn completion smoothly
+        if (!isConnected.get() || !isSetupComplete.get()) return
+        try {
+            // Gemini Live expects an explicit end marker when the microphone stream itself
+            // is stopped. This does not replace normal server-side VAD during active capture.
+            val sent = webSocket?.send("{\"realtimeInput\":{\"audioStreamEnd\":true}}") ?: false
+            if (sent) Log.d(TAG, "Sent realtimeInput.audioStreamEnd")
+        } catch (e: Exception) {
+            Log.e(TAG, "sendAudioStreamEnd failed: ${e.message}", e)
+        }
     }
 
     /**
@@ -910,18 +1014,18 @@ class GeminiLiveWebSocket(
         if (!isConnected.get() || !isSetupComplete.get() || text.isBlank()) return false
         return try {
             val msg = JSONObject().apply {
-                put("client_content", JSONObject().apply {
+                put("clientContent", JSONObject().apply {
                     put("turns", JSONArray().put(JSONObject().apply {
                         put("role", "user")
                         put("parts", JSONArray().put(JSONObject().apply {
                             put("text", text)
                         }))
                     }))
-                    put("turn_complete", true)
+                    put("turnComplete", true)
                 })
             }
             val sent = webSocket?.send(msg.toString()) == true
-            if (sent) Log.d(TAG, "Sent client_content (${text.length} chars)")
+            if (sent) Log.d(TAG, "Sent clientContent (${text.length} chars)")
             sent
         } catch (e: Exception) {
             Log.e(TAG, "sendClientContent failed: ${e.message}", e)
@@ -941,8 +1045,8 @@ class GeminiLiveWebSocket(
             var totalBytes = text.toByteArray(Charsets.UTF_8).size
             imageJpegs.take(12).forEach { image ->
                 if (image.isNotEmpty() && totalBytes + image.size <= 5 * 1024 * 1024) {
-                    parts.put(JSONObject().put("inline_data", JSONObject().apply {
-                        put("mime_type", "image/jpeg")
+                    parts.put(JSONObject().put("inlineData", JSONObject().apply {
+                        put("mimeType", "image/jpeg")
                         put("data", Base64.encodeToString(image, Base64.NO_WRAP))
                     }))
                     totalBytes += image.size
@@ -950,22 +1054,22 @@ class GeminiLiveWebSocket(
             }
             audioPcm16k.take(8).forEach { audio ->
                 if (audio.isNotEmpty() && totalBytes + audio.size <= 5 * 1024 * 1024) {
-                    parts.put(JSONObject().put("inline_data", JSONObject().apply {
-                        put("mime_type", "audio/pcm;rate=16000")
+                    parts.put(JSONObject().put("inlineData", JSONObject().apply {
+                        put("mimeType", "audio/pcm;rate=16000")
                         put("data", Base64.encodeToString(audio, Base64.NO_WRAP))
                     }))
                     totalBytes += audio.size
                 }
             }
-            val msg = JSONObject().put("client_content", JSONObject().apply {
+            val msg = JSONObject().put("clientContent", JSONObject().apply {
                 put("turns", JSONArray().put(JSONObject().apply {
                     put("role", "user")
                     put("parts", parts)
                 }))
-                put("turn_complete", true)
+                put("turnComplete", true)
             })
             val sent = webSocket?.send(msg.toString()) == true
-            if (sent) Log.i(TAG, "Sent multimodal client_content (images=${imageJpegs.size.coerceAtMost(12)}, audioSamples=${audioPcm16k.size.coerceAtMost(8)}, bytes=$totalBytes)")
+            if (sent) Log.i(TAG, "Sent multimodal clientContent (images=${imageJpegs.size.coerceAtMost(12)}, audioSamples=${audioPcm16k.size.coerceAtMost(8)}, bytes=$totalBytes)")
             sent
         } catch (e: Exception) {
             Log.e(TAG, "sendClientContentWithMedia failed: ${e.message}", e)
@@ -984,12 +1088,16 @@ class GeminiLiveWebSocket(
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(minimumDelayMs: Long = 0L) {
         reconnectJob?.cancel()
+        val attempt = reconnectAttempts.getAndUpdate { current -> (current + 1).coerceAtMost(8) }
+        val retryExponent = attempt.coerceAtLeast(0).coerceAtMost(5)
+        val exponentialDelay = (1_000L * (1 shl retryExponent)).coerceAtMost(30_000L)
+        val waitMs = maxOf(minimumDelayMs, exponentialDelay).coerceAtMost(60_000L)
         reconnectJob = coroutineScope?.launch(Dispatchers.IO) {
-            delay(500)
+            delay(waitMs)
             if (!isManuallyStopped.get()) {
-                Log.d(TAG, "Attempting auto-reconnect...")
+                Log.d(TAG, "Attempting auto-reconnect after ${waitMs}ms (attempt=${attempt + 1})")
                 initiateConnection()
             }
         }

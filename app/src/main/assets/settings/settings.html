@@ -573,11 +573,9 @@
       <div style="margin-top: 14px;">
         <label class="field-label">AI Neural Model</label>
         <select class="select-input" id="modelSelect">
-          <option value="models/gemini-3.1-flash-live-preview" selected>Gemini 3.1 Flash Live (Ultra-Low Latency ~700ms - Recommended)</option>
-          <option value="models/gemini-3.8-live">Gemini 3.8 Live (~900ms)</option>
-          <option value="models/gemini-2.5-flash-native-audio-preview-12-2025">Gemini 2.5 Flash Native Audio Preview (12-2025)</option>
+          <option value="models/gemini-3.8-live" selected>Gemini 3.8 Live (Stable • Recommended)</option>
         </select>
-        <div class="field-hint">Ultra-low latency streaming model with instant voice response (~700ms).</div>
+        <div class="field-hint">Stable Live API model for real-time voice, audio transcription and tool calls.</div>
       </div>
     </div>
   </div>
@@ -929,7 +927,12 @@
     try {
       const s = typeof settingsJsonStr === 'string' ? JSON.parse(settingsJsonStr) : settingsJsonStr;
       if (s.apiKey) document.getElementById('apiKeyInput').value = s.apiKey;
-      if (s.model) document.getElementById('modelSelect').value = s.model;
+      if (s.model) {
+        const modelSelect = document.getElementById('modelSelect');
+        modelSelect.value = s.model;
+        // Retired IDs from older releases deliberately migrate to the supported stable model.
+        if (!modelSelect.value) modelSelect.value = 'models/gemini-3.8-live';
+      }
       if (s.voice) selectVoice(s.voice);
       if (s.language) document.getElementById('languageSelect').value = s.language;
       if (s.personality) selectPersonality(s.personality);
