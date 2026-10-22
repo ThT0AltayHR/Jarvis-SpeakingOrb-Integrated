@@ -18,6 +18,6 @@ assert.match(player, /Recreating AudioTrack discards its hardware queue[\s\S]{0,
   'AudioTrack recovery replays the current chunk rather than skipping bytes accepted by a discarded sink');
 assert.match(policy, /if \(playbackActive && !userInterrupting && requested != ConversationState\.SPEAKING\)/,
   'queued or playing PCM blocks stale IDLE/LISTENING/THINKING transitions before SPEAKING is published');
-assert.match(build, /versionCode\s*=\s*161/);
-assert.match(build, /versionName\s*=\s*"1\.8\.25"/);
+assert.match(build, /versionCode\s*=\s*162/);
+assert.match(build, /versionName\s*=\s*"1\.8\.26"/);
 console.log('PASS Hotfix 12 source guards: playhead-linked amplitude, stale Orb-state suppression and chunk replay on AudioTrack rebuild');

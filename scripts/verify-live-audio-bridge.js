@@ -40,8 +40,8 @@ const thinkingGate = service.indexOf('if (_conversationState.value == Conversati
 const sendAudio = service.indexOf('liveWebSocket?.sendAudioChunk(chunk)', thinkingGate);
 assert.ok(thinkingGate >= 0 && sendAudio > thinkingGate,
   'mic frames are gated while thinking, before new audio is sent to Live');
-assert.match(service, /if \(_conversationState\.value == ConversationState\.THINKING\)\s*\{\s*consecutiveVoicedFrames = 0\s*return@AudioRecorder\s*\}/,
-  'ambient mic frames must not be fed back into a generating Live turn');
+assert.match(service, /if \(_conversationState\.value == ConversationState\.THINKING\)\s*\{\s*consecutiveVoicedFrames = 0[\s\S]*?val quietFrame = amplitude <= maxOf\(VAD_MIN_THRESHOLD, ambientNoiseFloor \* VAD_NOISE_MULTIPLIER\)[\s\S]*?if \(quietFrame && ownerGateOpen && hasSpeechInCurrentUtterance &&\s*now - lastUserSpeechDetectedTime < TRAILING_SILENCE_FORWARD_MS[\s\S]*?liveWebSocket\?\.sendAudioChunk\(chunk\)\s*\}\s*return@AudioRecorder\s*\}/,
+  'while thinking only QUIET trailing-silence frames (bounded window) reach Live; voiced/ambient-loud frames are never fed back');
 assert.match(service, /StreamingTextAccumulator\.append\(currentTurnAssistantText, textChunk\)/,
   'assistant live text uses the exact transcript-delta accumulator');
 const audioReceiveStart = service.indexOf('override fun onAudioDataReceived(pcmData: ByteArray)');

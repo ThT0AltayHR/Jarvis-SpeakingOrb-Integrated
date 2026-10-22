@@ -180,10 +180,13 @@ const expectedFullText = words.map(w => w.w + ' ').join('');
   assert.equal(test.dismissedTexts.length, 0, 'network or transcript gaps during active audio never trigger final dust');
 
   test.orb.externalAudioActive = false;
-  test.orb.externalAudioEndedAt = now;
+  test.orb.externalAudioEndedAt = now - 300;
   test.orb.externalAudioEndTime = 3.25;
+  test.orb.caption(3.55, line);
+  assert.equal(test.dismissedTexts.length, 0, 'no dust earlier than ~0.9 s after the voice really stopped');
+  test.orb.externalAudioEndedAt = now - 1000;
   test.orb.caption(5.1, line);
-  assert.equal(test.dismissedTexts.length, 1, 'the ended audio may dissolve after the full-text hold interval');
+  assert.equal(test.dismissedTexts.length, 1, 'the ended audio dissolves ~0.9 s after the voice stopped');
   assert.equal(test.dismissedTexts[0], expectedFullText, 'post-playback dust includes every completed sentence');
 }
 

@@ -240,7 +240,15 @@
       // in one pass. The old group key included W.length and therefore dusted text on EACH
       // incremental token update, before the sentence was even complete.
       if(L.captionDustDone){this.flight(t,[]);return;}
-      if(playbackHasEnded&&!audioStillPlaying&&t>=last+1.8){
+      // External (AudioTrack-driven) captions dissolve ~0.9s after the voice really stopped, so the
+      // sentence turns to dust right when Jarvis finishes. A hard 2.2s cap stops long estimated word
+      // timings from keeping stale text on screen. Local/preview lines keep the original 1.8s hold.
+      const sinceVoiceEnded=L.externalSync&&this.externalAudioEndedAt!==null?(performance.now()-this.externalAudioEndedAt)/1000:0;
+      // The 2.2s cap is measured from the later of voice-end and the line's own creation, so a late
+      // transcript line (created after the previous dust-out) still gets to show before it dissolves.
+      const capSince=L.externalSync&&this.externalAudioEndedAt!==null?(performance.now()-Math.max(this.externalAudioEndedAt,L.createdAt||0))/1000:0;
+      const dustDue=L.externalSync?(sinceVoiceEnded>=.9&&(t>=last+.9||capSince>=2.2)):t>=last+1.8;
+      if(playbackHasEnded&&!audioStillPlaying&&dustDue){
         if(el.childElementCount){this.dismissCaptionDust();el.textContent='';}
         el.dataset.g='';
         L.captionDustDone=true;

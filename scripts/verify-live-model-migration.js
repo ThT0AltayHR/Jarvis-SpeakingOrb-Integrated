@@ -26,5 +26,5 @@ ok(options.length === 1 && options[0] === 'models/gemini-3.8-live', 'Web setting
 ok(html.includes("if (!modelSelect.value) modelSelect.value = 'models/gemini-3.8-live'"), 'retired saved model values safely migrate to stable default');
 ok(!xml.includes('etCustomEndpoint') && !apiActivity.includes('binding.etCustomEndpoint') && apiActivity.includes('preferences.customEndpoint = \"\"'), 'inactive custom endpoint control removed and stale saved value cleared');
 ok(apiActivity.includes('API KEY CHECK PASSED • HTTP REACHABLE') && !apiActivity.includes('CONNECTED • HANDSHAKE OK'), 'API key test no longer falsely claims a Live WebSocket handshake');
-ok(/versionCode\s*=\s*161/.test(gradle) && /versionName\s*=\s*"1\.8\.25"/.test(gradle), 'release version bumped to 1.8.25 / 161');
+ok(/versionCode\s*=\s*162/.test(gradle) && /versionName\s*=\s*"1\.8\.26"/.test(gradle), 'release version bumped to 1.8.26 / 162');
 if (process.exitCode) process.exit(process.exitCode);

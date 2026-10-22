@@ -106,8 +106,10 @@ assert.match(speakingOrbSource, /Words appended to the SAME line object are\s+\/
   'incremental token updates must preserve earlier words and sentences in the same caption line');
 assert.doesNotMatch(speakingOrbSource, /const key=gi\+':'+W\.length/,
   'caption DOM identity must not change when streamed word count increases');
-assert.match(speakingOrbSource, /if\(playbackHasEnded&&!audioStillPlaying&&t>=last\+1\.8\)/,
-  'the full caption must remain visible until the final-word hold interval, then dissolve once');
+assert.match(speakingOrbSource, /sinceVoiceEnded>=\.9&&\(t>=last\+\.9\|\|capSince>=2\.2\)/,
+  'external captions dissolve ~0.9 s after the voice stopped (hard cap 2.2 s)');
+assert.match(speakingOrbSource, /if\(playbackHasEnded&&!audioStillPlaying&&dustDue\)/,
+  'the full caption must remain visible until the hold interval, then dissolve once');
 assert.match(speakingOrbSource, /dismissCaptionDust\(\)[\s\S]*this\.exitDust=\{startedAt:performance\.now\(\),particles:/,
   'visible caption glyphs must be rasterized into outgoing dust particles');
 assert.match(speakingOrbSource, /externalAudioEndedAt/,

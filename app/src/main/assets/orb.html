@@ -273,6 +273,21 @@
         const next = safeText(value);
         if (!next) { clearText(); return; }
         if (!orb || !orb.estimate) return;
+        if (orb.line && orb.line.captionDustDone && currentText && next.length > currentText.length && next.startsWith(currentText)) {
+          // Output transcription can trail the audio. Words that arrive after the previous
+          // caption already turned to dust must still be shown (and dusted) as their own short line;
+          // appending them to the finished line would silently drop them.
+          const lateTokens = next.slice(currentText.length).trim().split(/\s+/).filter(Boolean);
+          currentText = next;
+          if (!lateTokens.length) return;
+          const clock = Math.max(0, (Number(orb.externalAudioEndTime) || 0) +
+            (orb.externalAudioEndedAt !== null ? (performance.now() - orb.externalAudioEndedAt) / 1000 : 0));
+          orb.line = {
+            toks: lateTokens.slice(), words: orb.estimate(lateTokens, clock), t0: 0, live: true, who: 'assistant',
+            externalSync: true, waitingForPlayback: false, playbackStarted: true, createdAt: performance.now()
+          };
+          return;
+        }
         if (!currentText || !next.startsWith(currentText)) {
           // A corrected/restarted transcript can begin without an intervening blank state.
           // Reset the DOM group key or a same-length next reply can accidentally keep old words.
@@ -412,8 +427,10 @@
           } else if (nextActive && line && line.externalSync && line.waitingForPlayback) {
             line.waitingForPlayback = false;
           }
-          orb.level = Math.max(0, Math.min(1, Number(amp) || 0));
-          orb.externalAudioLevel = orb.level;
+          // NOTE: SpeakingOrb.level is a read-only (getter-only) accessor. Assigning to it inside
+          // this 'use strict' script threw a TypeError on EVERY audio sample, so
+          // externalAudioActive was never set and captions never appeared.
+          orb.externalAudioLevel = Math.max(0, Math.min(1, Number(amp) || 0));
           orb.externalAudioTime = nextTime;
           orb.externalAudioActive = nextActive;
           if (nextActive && primaryState !== 'speaking') setPrimaryState('speaking');
