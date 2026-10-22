@@ -48,8 +48,8 @@ assert.match(service, /queuedForPlayback = synchronized\(providerOutputGateLock\
   'autonomous buffered speech cannot be enqueued after a user interrupt won the race');
 assert.match(service, /providerTurnComplete = true[\s\S]{0,180}notifyTurnComplete\(\)/,
   'transport/API errors close a stranded audio turn so the orb cannot remain stuck in SPEAKING');
-assert.match(build, /versionCode\s*=\s*162/);
-assert.match(build, /versionName\s*=\s*"1\.8\.26"/);
+assert.match(build, /versionCode\s*=\s*163/);
+assert.match(build, /versionName\s*=\s*"1\.8\.27"/);
 
 // Truth table: completion of model generation is not proof that device playback has drained.
 const mustSuppress = ({ providerComplete, playing, queueActive, speaking }) =>

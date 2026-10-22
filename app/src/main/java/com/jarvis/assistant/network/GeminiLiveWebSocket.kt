@@ -676,6 +676,17 @@ class GeminiLiveWebSocket(
                 }))
             })
         }
+        if (activeModel == GeminiConstants.MODEL_3_1_FLASH) {
+            // The 3.1 live preview build that answered instantly never sent per-tool "behavior"
+            // (BLOCKING is the default anyway); keep the payload identical to that build.
+            try {
+                val decls = setup.getJSONObject("setup").getJSONArray("tools")
+                    .getJSONObject(0).getJSONArray("functionDeclarations")
+                for (i in 0 until decls.length()) decls.getJSONObject(i).remove("behavior")
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not normalize tool declarations for $activeModel: ${e.message}")
+            }
+        }
         val json = setup.toString()
         Log.d(TAG, "Sending BidiSetup payload to Gemini Live with tools")
         ws.send(json)

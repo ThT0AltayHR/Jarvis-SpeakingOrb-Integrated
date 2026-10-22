@@ -28,7 +28,7 @@ assert.ok(!/embedded release API key/i.test(layout) && layout.includes('does not
 assert.ok(router.includes('TYPE_BUILTIN_SPEAKER') && router.includes('setCommunicationDevice(it)') && router.includes('communicationRouteActive = false') && router.includes('communicationRouteActive = true'), 'speaker route records success/fallback and only trusts AEC on a confirmed route');
 assert.ok(player.includes('AudioAttributes.USAGE_VOICE_COMMUNICATION'), 'PCM output uses the communication audio path');
 assert.ok(detector.includes('SPEAKER_TO_PLAYBACK_RATIO = 0.30f') && detector.includes('SPEAKER_FALLBACK_TO_PLAYBACK_RATIO = 0.34f'), 'barge-in thresholds distinguish AEC and fallback paths');
-assert.ok(/versionCode\s*=\s*162/.test(build) && /versionName\s*=\s*"1\.8\.26"/.test(build), 'release version matches Hotfix 13');
+assert.ok(/versionCode\s*=\s*163/.test(build) && /versionName\s*=\s*"1\.8\.27"/.test(build), 'release version matches Hotfix 14');
 console.log('PASS duplicate non-repeatable Kotlin annotations are absent');
 console.log('PASS concurrent conversation-state changes and transcript snapshots are serialized');
 console.log('PASS muting the mic does not falsify assistant playback state');

@@ -467,9 +467,6 @@ class JarvisConversationService : Service() {
     private val VAD_NOISE_MULTIPLIER = 2.0f
     private val VAD_START_FRAMES = 5
     private val VAD_MIN_UTTERANCE_FRAMES = 10
-    // How long (after the last voiced frame) quiet mic frames are still streamed to Gemini while THINKING,
-    // so its server-side end-of-speech detector receives the trailing silence it needs to answer at once.
-    private val TRAILING_SILENCE_FORWARD_MS = 1500L
     // Loop guard: once tripped, ALL automation tools are refused until the user speaks again.
     @Volatile
     private var autonomousHardStop = false
@@ -1815,19 +1812,14 @@ class JarvisConversationService : Service() {
                 // by the active-playback path above.
                 if (_conversationState.value == ConversationState.THINKING) {
                     consecutiveVoicedFrames = 0
-                    // Gemini's server-side VAD only commits "the user finished" after it has RECEIVED
-                    // enough trailing silence. The local VAD flips to THINKING after ~450 ms and this
-                    // branch used to stop streaming completely, so the server could sit waiting for
-                    // silence that never arrived (felt like Jarvis "thinking" for a very long time).
-                    // Keep forwarding QUIET frames only, for a short bounded window. Voiced/ambient-loud
-                    // frames are still dropped, so the model cannot be interrupted by room noise.
-                    val quietFrame = amplitude <= maxOf(VAD_MIN_THRESHOLD, ambientNoiseFloor * VAD_NOISE_MULTIPLIER)
+                    // Keep streaming the mic to Gemini while it prepares the answer, exactly like the
+                    // build that replied within ~1 s. Stopping the stream here (old Hotfix 8-12 behaviour)
+                    // left Gemini's server-side end-of-speech detector without audio and made it wait
+                    // seconds before answering. The speaker-active branch below still mutes the mic as
+                    // soon as Jarvis actually talks, so it cannot hear itself.
                     val ownerGateOpen = !(preferences.isOwnerVoiceEnabled && preferences.hasOwnerVoiceProfile()) ||
                         isCurrentTurnOwnerVoiceVerified
-                    if (quietFrame && ownerGateOpen && hasSpeechInCurrentUtterance &&
-                        now - lastUserSpeechDetectedTime < TRAILING_SILENCE_FORWARD_MS &&
-                        liveWebSocket?.isSessionReady() == true
-                    ) {
+                    if (ownerGateOpen && hasSpeechInCurrentUtterance && liveWebSocket?.isSessionReady() == true) {
                         liveWebSocket?.sendAudioChunk(chunk)
                     }
                     return@AudioRecorder

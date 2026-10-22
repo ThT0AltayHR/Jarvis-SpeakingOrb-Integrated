@@ -56,8 +56,12 @@ class ApiConnectionActivity : AppCompatActivity() {
             binding.viewStatusDot.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
         }
 
-        // AppPreferences migrates unsupported or retired model IDs to the stable default.
-        binding.rbModelFlashThinking.isChecked = true
+        // AppPreferences migrates unsupported or retired model IDs to the default.
+        if (preferences.aiModel == GeminiConstants.MODEL_3_8_LIVE) {
+            binding.rbModelFlash20.isChecked = true
+        } else {
+            binding.rbModelFlashThinking.isChecked = true
+        }
 
         if (!preferences.canStoreApiKeySecurely) {
             // Keep the secure-storage warning set above.
@@ -146,7 +150,11 @@ class ApiConnectionActivity : AppCompatActivity() {
 
     private fun saveAndApply() {
         val key = binding.etApiKey.text?.toString()?.trim() ?: ""
-        val selectedModel = GeminiConstants.DEFAULT_MODEL
+        val selectedModel = if (binding.rbModelFlash20.isChecked) {
+            GeminiConstants.MODEL_3_8_LIVE
+        } else {
+            GeminiConstants.MODEL_3_1_FLASH
+        }
 
         try {
             preferences.apiKey = key

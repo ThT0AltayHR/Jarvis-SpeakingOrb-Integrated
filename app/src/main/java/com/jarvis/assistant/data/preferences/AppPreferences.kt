@@ -36,6 +36,14 @@ class AppPreferences(context: Context) {
         if (current == null || current !in GeminiConstants.SUPPORTED_MODELS) {
             prefs.edit().putString(KEY_MODEL, GeminiConstants.DEFAULT_MODEL).apply()
         }
+        // One-time: move installs that were force-migrated to gemini-3.8-live back to the fast default.
+        // After this the user's own choice in the API screen is respected.
+        if (!prefs.getBoolean(KEY_MODEL_FAST_DEFAULT_APPLIED, false)) {
+            prefs.edit()
+                .putString(KEY_MODEL, GeminiConstants.DEFAULT_MODEL)
+                .putBoolean(KEY_MODEL_FAST_DEFAULT_APPLIED, true)
+                .apply()
+        }
     }
 
     companion object {
@@ -44,6 +52,7 @@ class AppPreferences(context: Context) {
         private const val TAG = "AppPreferences"
         private const val KEY_API_KEY = "key_api_key"
         private const val KEY_MODEL = "key_model"
+        private const val KEY_MODEL_FAST_DEFAULT_APPLIED = "key_model_fast_default_applied_v1"
         private const val KEY_VOICE = "key_voice"
         private const val KEY_PERSONALITY = "key_personality"
         private const val KEY_USER_NAME = "key_user_name"

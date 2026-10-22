@@ -11,10 +11,13 @@ object GeminiConstants {
 
     const val RELEASE_API_KEY = ""
 
-    const val DEFAULT_MODEL = MODEL_3_8_LIVE
+    // gemini-3.1-flash-live-preview answers ~1 s after the user stops talking (the build that felt
+    // instant used it). gemini-3.8-live is slower in this app (7-9 s), so 3.1 is the default and 3.8
+    // stays selectable in the API screen.
+    const val DEFAULT_MODEL = MODEL_3_1_FLASH
 
     // Only model IDs verified against the current Live API are user-selectable.
-    val SUPPORTED_MODELS = listOf(MODEL_3_8_LIVE)
+    val SUPPORTED_MODELS = listOf(MODEL_3_1_FLASH, MODEL_3_8_LIVE)
 
     const val DEFAULT_LANGUAGE = "Turkish"
 
